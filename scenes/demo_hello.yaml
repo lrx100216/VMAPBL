@@ -1,0 +1,23 @@
+# M2 演示场景：手动触发 → 冷却/模板条件 → skill 返回值 → choose 分支 → speak 占位。
+# 验证方法见 README：python main.py --trigger demo_hello（5 秒内连发第二次会被冷却拦截）
+id: demo_hello
+name: M2 引擎自检演示场景
+trigger:
+  - type: manual
+condition:
+  - type: cooldown
+    seconds: 5                     # 演示用短冷却；正式场景的冷却写自己的秒数
+  - type: template
+    expr: "occupancy == True or occupancy == False"   # 恒真：只验证表达式通路
+action:
+  - type: skill
+    name: demo_echo
+    args: { text: "out" }
+  - type: choose
+    branches:
+      - when: "result == 'out'"
+        do: [{ type: speak, text: "演示分支 out 命中：引擎链路正常" }]
+      - when: "result == 'in'"
+        do: [{ type: speak, text: "演示分支 in 命中" }]
+mode: single
+priority: 0

@@ -1,0 +1,122 @@
+# 全局设置：所有阈值/冷却时间/ROI 多边形坐标的唯一事实源。
+# 场景 YAML 里的值优先级高于这里的默认值；M4 的标定工具会往 roi: 分区写多边形。
+
+global:
+  db_path: data/butler.db        # SQLite 决策日志位置（相对项目根目录）
+  default_cooldown_s: 60         # 场景 cooldown 条件未写 seconds 时回落到此默认冷却（秒）
+
+# M4 感知层参数
+camera:
+  width: 1280
+  height: 720
+  fps: 30                  # 采集与文件回放统一节奏（规范：30fps）
+  ring_seconds: 60         # 环形缓冲时长（规范：60 秒）
+  ring_width: 640          # 缓冲帧长边（JPEG 存储，1800 帧约 70~120MB）
+  ring_jpeg_quality: 60
+motion:
+  trigger_ratio: 0.15            # MOG2 前景像素占比 ≥ 此值 → 判定有运动（触发阈值）
+  release_ratio: 0.05            # 占比 < 此值 → 运动结束（释放阈值，滞回防抖）
+  still_seconds: 10              # 连续静止多少秒 → state.is_still = true
+  proc_width: 640                # MOG2 前缩放到此宽度（省电；占比与尺度无关）
+  mog2_history: 500              # 背景模型历史帧数（静止人体约 500/30≈17s 被吸收）
+  mog2_var_threshold: 32         # MOG2 像素判前景的方差阈值
+  morph_kernel: 5                # 形态学开运算去噪核（像素）
+  warmup_frames: 5               # MOG2 前 N 帧只建模不判定（首帧会把整帧报成前景）
+pose:
+  weights: yolo26n-pose.pt       # 相对项目根；CoreML 版为同名 .mlpackage
+  prefer_coreml: true            # .mlpackage 存在则优先加载（M2 芯片更快更省电）
+  conf: 0.5                      # 人体框置信度阈值
+  interval_s: 0.5                # 姿态确认最小间隔（节流省电；第二道闸门）
+occupancy:
+  hold_s: 3.0                    # 连续多久没确认到人形 → occupancy=off（验证标准：离开 3 秒）
+
+# M3 语音链
+tts:
+  voice: Tingting                # say -v 的声音名（系统内置中文女声）
+  rate: 0                        # say -r 语速（词/分），0 = 系统默认；老人听不清可调 150
+  tail_silence_ms: 400           # 播报结束后强制静默（半双工硬性要求，规范第四节）
+stt:
+  model_size: small              # faster-whisper 模型（首次使用自动下载约 460MB）
+  device: cpu
+  compute_type: int8
+  language: zh
+  beam_size: 1                   # M2 机器 greedy 解码足够（实测 small/int8 约 1.4s/句）
+  initial_prompt: ""             # 非空时作为 whisper 提示（如 "以下是普通话日常对话。"）
+  timeout_s: 8.0                 # listen() 等第一句话的最长秒数
+audio:
+  sample_rate: 48000             # 麦克风原生采样率
+  target_rate: 16000             # 送 VAD/Whisper 的重采样目标
+  block_ms: 100                  # 每次回调块长（100ms = 4800 采样点）
+vad:
+  threshold: 0.5
+  min_silence_ms: 500            # 语句结束后多长静音算说完
+  speech_pad_ms: 200             # 语句段前后留白
+  max_utterance_s: 15.0          # 单句最长录音（防一句话卡死）
+
+# M3 场景8：Apple Vision OCR（L2.5 档）
+ocr:
+  languages: [zh-Hans, en-US]
+  min_confidence: 0.3            # 低于此置信度的 OCR 行丢弃
+photo_ocr:
+  read_keywords: [念, 读, 什么字, 写着什么, 念一下, 读一下, 上面写]  # 命中=只朗读，不升 VLM
+messaging:
+  refusal_keywords: [不用, 不要回, 别回]   # 回复≤6字且含这些词 → 视为不回复
+llm:
+  cost_per_call_cny: 0.0008      # 估算成本（api_calls 表折算用，规范 L3 档单价）
+  timeout_s: 30
+  max_tokens: 1024               # 思考模式先吃预算，必须给足（M0 实测教训）
+family_query:
+  fall_confidence: 0.75          # 场景2：VLM posture=D 且 on_floor 且置信度>此值 → 紧急通知
+
+# M5 场景 3/5/6（几何/骨架判据，阈值都在这里调）
+door:
+  window_s: 4.0              # 场景3：落点投票用的姿态历史窗口（秒）
+wakeup:
+  overlap_ratio: 0.5         # 场景5：人体框面积落入床区 ROI ≥ 此比例 → 判在床上
+  urgent_keywords: [救命, 摔倒, 不舒服, 快来]   # 语音确认回复命中 → 最高紧急（规范第六节）
+getup:
+  window_s: 15.0             # 场景6：起身判定回看窗口（秒）
+  min_samples: 4             # 窗口内有效骨架样本少于此数 → uncertain（不通知）
+  torso_upright_deg: 50      # 末段躯干倾角 ≤ 此值（度）算「竖起」（0=竖直 90=躺平）
+  torso_lying_deg: 60        # 首末躯干角都 ≥ 此值 → 翻身（过滤，不通知）
+  hip_rise_min: 0.08         # 髋部归一化高度抬升幅度下限（帧高占比，y 向下故起身=减小）
+
+# M6 场景 7/4（阈值哲学：跌倒宁可误报不可漏报，吃药宁可漏报不可误报——两套阈值不共用）
+fall:
+  spike_ratio: 0.30          # 触发筛选：静止前窗口内前景占比峰值 ≥ 此值才算「运动突变」
+  spike_window_s: 3.0        # 突变回查窗口：安静开始前多少秒内（秒）
+  motion_keep_s: 30.0        # MotionHistory 保留时长（须 > still_seconds + spike_window_s）
+  window_s: 8.0              # fall_decide 骨架时序终审的回看窗口（秒），锚在安静开始时刻
+                             # （sensor.sudden_still 载荷的 quiet_since = 跌倒运动突变结束点），
+                             # 必须 < still_seconds + 突变时长才会漏掉下坠段，别调小
+  min_samples: 6             # 窗口内有效骨架样本少于此数 → uncertain（走二次确认）
+  drop_rate_min: 0.35        # 相邻样本髋部下坠速率峰值下限（帧高/秒，y 向下故下坠=增大）
+  torso_upright_deg: 50      # 首段躯干倾角 ≤ 此值（度）算「由直立开始」
+  torso_lying_deg: 60        # 末段躯干倾角 ≥ 此值（度）算「转为躺平」
+  end_hip_low: 0.55          # 末段髋部归一化高度 ≥ 此值算「沉入画面下半」
+  confirm_listen_s: 8.0      # 二次确认：语音询问后等待回复的秒数
+  re_alert_s: 1800           # 确认报警后的防重复静默（秒）；无应答=高危，会立即通知
+  fine_keywords: [没事, 没摔, 还好, 自己起来]   # 二次确认回复命中且不含求助词 → 撤警
+  distress_keywords: [救命, 疼, 摔, 起不来, 动不了]   # 命中 → 紧急通知（压过没事词）
+medication:
+  window_s: 3600             # 观察窗：播提醒后持续采样多少秒（规范 09:30–10:30 一小时）
+  sample_s: 1.0              # 观察窗内采样间隔（秒；每样本一次药盒检测，阶段二加姿态）
+  vote_frames: 5             # 滑窗长度（规范：5 帧窗口）
+  vote_min: 3                # 滑窗内至少命中帧数（规范：至少 3 帧才算数）
+  box_dilate: 0.2            # 阶段二：药盒框按自身宽高向外扩张比例（手在盒边也算近盒）
+  kp_conf: 0.3               # 手腕关键点置信度下限
+  confirm_listen_s: 8.0      # 降级语音确认等待回复的秒数
+  remind_text: "奶奶，该吃{slot}的药了。"   # 播报文案，{slot} 换成时段名
+  slot_labels: {morning: 早上, noon: 中午, evening: 晚上}
+  taken_keywords: [吃了, 吃过, 吃好了]   # 降级路径回复命中 → 记已服药
+pillbox:
+  weights: models/pillbox.pt  # 自训药盒检测器（tools/train_pillbox.py 产出）；不存在则走降级语音
+  conf: 0.5                   # 药盒框置信度阈值
+
+# M7 家人端控制台（FastAPI + WebSocket + 单页 HTML）
+server:
+  host: 127.0.0.1             # 只监听本机回环：家人端控制台不对外开放
+  port: 8321                  # 浏览器访问 http://127.0.0.1:8321
+  frame_interval_s: 3.0       # 前端缩略图轮询间隔（秒；省电，画面变化才值得更频繁）
+
+roi: {}  # M4 标定工具写入：door_inside / door_outside / bed 等多边形顶点坐标

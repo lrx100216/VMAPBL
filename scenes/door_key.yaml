@@ -1,0 +1,27 @@
+# 场景3 · 出门/回家提醒钥匙（规范第五节的样例场景，第六节：L1 几何 ROI）。
+# 判定在 actions/door.py：门内/门外两个 ROI 多边形 + 人体框底边中点落点投票，
+# 只有落点无法判定时才调 VLM 兜底（M5 唯一的云端调用点）。
+id: door_key
+name: 场景3 · 出门/回家提醒钥匙
+trigger:
+  - type: state
+    entity: occupancy
+    to: "on"
+  - type: manual            # 调试/回放用：main.py --trigger door_key
+condition:
+  - type: cooldown
+    seconds: 60
+  - type: time_window       # 深夜不提醒（可选条件，规范样例自带）
+    after: "06:00:00"
+    before: "23:00:00"
+action:
+  - type: skill
+    name: door_decision
+  - type: choose
+    branches:
+      - when: "result == 'out'"
+        do: [{ type: speak, text: "奶奶，出门别忘记拿钥匙，在外面要注意安全哦" }]
+      - when: "result == 'in'"
+        do: [{ type: speak, text: "奶奶，欢迎回家，记得先放好钥匙哦" }]
+mode: single
+priority: 0

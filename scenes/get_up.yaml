@@ -1,0 +1,27 @@
+# 场景6 · 老人起身通知（规范第六节：L2 骨架几何——髋部归一化高度 + 躯干倾角）。
+# 触发是「运动后静止」（sensor.still）：起身和翻身都会先动后停，
+# 判据在 actions/getup.py + sensors/geometry.classify_getup，翻身必须被过滤。
+id: get_up
+name: 场景6 · 老人起身通知
+trigger:
+  - type: event
+    event: sensor.still
+  - type: manual            # 调试/回放用：main.py --trigger get_up
+condition:
+  - type: cooldown
+    seconds: 300            # 起身通知不必频繁：5 分钟内只报一次
+action:
+  - type: skill
+    name: getup_decide
+  - type: choose
+    branches:
+      - when: "result == 'getup'"
+        do:
+          - type: speak
+            text: "请等一下再下床，我已经通知您儿子过来了"
+          - type: skill
+            name: getup_notify
+          - type: skill
+            name: console_blink
+mode: single
+priority: 80                # 仲裁约定：跌倒 100 > 未起床 90 > 起身 80 > 其他 0

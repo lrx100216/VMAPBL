@@ -1,0 +1,19 @@
+# 场景1b · 家人联系老人（规范第六节）：播报留言 → 问是否回复 → 录音 → 回发。
+# 触发：家人端控制台 POST /api/msg_to_elder → 总线 family.msg_to_elder 事件
+# （M7 起；M7 前是 manual + --text 模拟）。manual 保留给调试/回放。
+id: msg_to_elder
+name: 场景1b · 家人留言播报与回复
+trigger:
+  - type: manual
+  - type: event
+    event: family.msg_to_elder
+condition:
+  - type: cooldown
+    seconds: 5
+action:
+  - type: skill
+    name: family_message_receive
+  - type: speak
+    expr: "result['speech']"
+mode: single
+priority: 0

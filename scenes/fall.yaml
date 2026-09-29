@@ -1,0 +1,27 @@
+# 场景7 · 老人跌倒检测（规范第六节：L2 骨架时序 + 滑动窗口；降级方案＝
+# 骨架几何 + 持续静止 + 二次确认，绝对不用「单帧问 VLM」当主判据）。
+# 触发链：perception 在静止边沿回查「安静开始前 spike_window_s 内有运动突变
+# 且画面有人」→ sensor.sudden_still；fall_decide 用骨架时序终审；
+# fall 与 uncertain 都走 fall_confirm 语音二次确认（宁可误报不可漏报，
+# 误报由老人本人说「没事」一票否决）；no_fall / stopped 无分支命中，
+# 只落库不打扰。
+id: fall
+name: 场景7 · 老人跌倒检测
+trigger:
+  - type: event
+    event: sensor.sudden_still
+  - type: manual            # 调试/回放用：main.py --trigger fall
+condition:
+  - type: cooldown
+    seconds: 30             # 兜底节流；真正的防重复靠 fall_confirm 的 stop 静默
+action:
+  - type: skill
+    name: fall_decide
+  - type: choose
+    branches:
+      - when: "result == 'fall' or result == 'uncertain'"
+        do:
+          - type: skill
+            name: fall_confirm
+mode: single
+priority: 100               # 仲裁约定：跌倒 100 > 未起床 90 > 起身 80 > 其他 0

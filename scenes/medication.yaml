@@ -1,0 +1,26 @@
+# 场景4 · 智能吃药提醒（规范第六节：L2 自训药盒检测器 + 时序投票，两阶段：
+# 先确认药盒在场，再判服药动作；5 帧滑窗 ≥3 帧命中才算数）。
+# 触发：09:30–10:30 时间窗。time 触发器到点即投仲裁（每天一次，由引擎记账
+# 去重），time_window 条件把手动误触拦在窗外。「当天是否已吃」的判断放在
+# actions/medication.py 内部（按 _marked_date 日期键去重，跨天自动重置）——
+# 不做成 template 条件：StateStore.medication_taken 是进程态无按日清零，
+# 做成条件会让场景4 在常驻进程里只活一天（评审回归）。动作内部还有
+# window_s 观察窗持续采样投票，超时未确认 → 通知家人「未检测到服药」。
+# 不加 cooldown：当天名额由 time 触发器去重保证，手动触发要保持可重测。
+id: medication
+name: 场景4 · 智能吃药提醒
+trigger:
+  - type: time
+    at: "09:30:00"
+  - type: manual            # 调试/回放用：main.py --trigger medication
+condition:
+  - type: time_window
+    after: "09:30:00"
+    before: "10:30:00"
+action:
+  - type: skill
+    name: medication_watch
+    args:
+      slot: morning
+mode: single
+priority: 0                 # 普通场景：跌倒 100 > 未起床 90 > 起身 80 > 其他 0

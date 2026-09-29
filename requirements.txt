@@ -1,0 +1,45 @@
+# ============================================================
+# 本地 AI 管家 · Python 依赖
+# 环境：Python 3.13（venv）/ macOS arm64（Apple Silicon M2）
+# 按里程碑分组；M0 只需要「M0-M1」这一组（已在 .venv 预装）。
+# 版本号只写下限，由 pip 解析最新兼容版。
+# 所有包名与 macOS arm64 + Py3.13 可装性已于 2026-09 逐项核实（PyPI 一手数据）。
+# ============================================================
+
+# ----- M0 自检 / M1 最小闭环 -----
+opencv-python>=4.10        # 摄像头采集（必须用 cv2.CAP_AVFOUNDATION 后端）
+numpy>=2.0
+sounddevice>=0.5           # 麦克风 48kHz 采集（PortAudio）
+openai>=1.50               # DeepSeek OpenAI 兼容客户端
+python-dotenv>=1.0         # .env 加载
+
+# ----- M2 骨架 -----
+PyYAML>=6.0                # 场景 YAML
+simpleeval>=1.0            # 条件表达式安全求值（禁止裸 eval）
+
+# ----- M3 语音链 -----
+faster-whisper>=1.1        # STT：small + int8 + zh，模型常驻（ctranslate2 有 macOS arm64 wheel）
+silero-vad[onnx-cpu]>=5.1  # VAD：官方包自带约 2MB ONNX 模型；必须带 onnx-cpu extra 才会装 onnxruntime
+scipy>=1.14                # 48k→16k 重采样（scipy.signal.resample_poly(x, 1, 3)）
+
+# ----- M4 感知层 -----
+ultralytics>=8.4           # yolo26n / yolo26n-pose 自 v8.4.0（2026-01）起提供
+coremltools>=9.0           # export(format="coreml") 导出 .mlpackage（Apple Silicon 推理）
+torch==2.9.1               # 钉死：torchaudio 2.9.1 要求同名版本；coremltools 9.0 与
+torchvision==0.24.1        # torch 2.14 的导出路径不兼容（2026-09-23 实测教训）
+ruamel.yaml>=0.18          # ROI 标定工具写回 settings.yaml 时保留人工注释
+
+# ----- M7 家人端 -----
+fastapi>=0.115
+uvicorn[standard]>=0.30
+websockets>=13
+
+# ----- 场景8：Apple Vision OCR（仅 macOS，PyObjC）-----
+pyobjc-framework-Vision>=10.0   # 调用链：VNRecognizeTextRequest + VNImageRequestHandler
+
+# ----- 可选：隐私模式本地 VLM（backend="local" 时再装；macOS 上仅 Apple Silicon）-----
+# mlx-vlm
+
+# ----- 开发/测试（M2 起）-----
+pytest>=8
+pytest-asyncio>=0.24

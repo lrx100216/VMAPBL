@@ -1,0 +1,33 @@
+# 场景1 · 老人语音联系家人（规范第六节）：LLM 抽取收件人与正文 →
+# 推送家人端 → 语音回执。触发：语音输入（intent=message）。
+id: msg_to_family
+name: 场景1 · 老人语音联系家人
+trigger:
+  - type: speech
+    intent: message
+condition:
+  - type: cooldown
+    seconds: 5
+action:
+  - type: skill
+    name: family_message_send
+  - type: choose
+    branches:
+      - when: "result['status'] == 'sent'"
+        do:
+          - type: speak
+            expr: "result['speech']"
+      - when: "result['status'] == 'no_recipient'"
+        do:
+          - type: speak
+            text: 奶奶，您想发给谁呀？可以说，给儿子发消息。
+      - when: "result['status'] == 'empty'"
+        do:
+          - type: speak
+            text: 奶奶，我没听清您要说什么，再说一次好吗？
+      - when: "result['status'] == 'uncertain'"
+        do:
+          - type: speak
+            text: 奶奶，我这边网络不太好，等下再试一次好吗？
+mode: single
+priority: 0

@@ -1,0 +1,19 @@
+# 场景5 · 老人未正常起床（规范第六节：L2 床区 ROI + 人体框位置，三分类+升级链）。
+# 升级链状态机（首检→复查→语音询问→关键词判紧急）在 actions/wakeup.py 里，
+# 这里只负责两个定时触发点：08:30 首检、09:00 复查。
+id: wake_up
+name: 场景5 · 老人未正常起床
+trigger:
+  - type: time
+    at: "08:30:00"
+  - type: time
+    at: "09:00:00"
+  - type: manual            # 调试/回放用：main.py --trigger wake_up
+condition:
+  - type: cooldown
+    seconds: 1200           # 防定时 tick 抖动重入；升级链靠 pending 状态区分首检/复查
+action:
+  - type: skill
+    name: wakeup_check
+mode: single
+priority: 90                # 仲裁约定：跌倒 100 > 未起床 90 > 起身 80 > 其他 0

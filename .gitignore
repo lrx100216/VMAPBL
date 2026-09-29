@@ -1,0 +1,26 @@
+# 密钥与环境（纪律要求，绝不入库）
+.env
+
+# 测试素材与视频（体积大且含隐私画面）
+tests/media/
+*.mp4
+
+# 模型权重（首次运行自动下载/导出，不入库）
+*.pt
+*.mlpackage/
+
+# 运行时产物（SQLite 库、自检样帧等）
+data/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# 测试临时产物与外部工具目录（非项目源码）
+.pytest_tmp/
+.workbuddy/

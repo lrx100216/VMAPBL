@@ -1,0 +1,25 @@
+# 场景8 · 拍照文字识别（规范第六节）：OCR 优先，语义问题才升 VLM。
+# 触发：语音提问（intent=photo，由 skills/intent.py 分类后路由过来）。
+id: photo_ocr
+name: 场景8 · 拍照文字识别
+trigger:
+  - type: speech
+    intent: photo
+condition:
+  - type: cooldown
+    seconds: 10
+action:
+  - type: skill
+    name: photo_read
+  - type: choose
+    branches:
+      - when: "result['status'] == 'ok'"
+        do:
+          - type: speak
+            expr: "result['speech']"
+      - when: "result['status'] == 'uncertain'"
+        do:
+          - type: speak
+            text: 奶奶，这个我看不太清，能把纸举近一点、光线亮一点再问我吗？
+mode: single
+priority: 0

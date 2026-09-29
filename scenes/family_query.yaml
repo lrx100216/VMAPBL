@@ -1,0 +1,15 @@
+# 场景2 · 家人远程询问老人状态（规范第六节）：唯一必须用 VLM 的场景。
+# 抓当前帧 → VLM 按 5 条隐私规则生成给子女的话 → 推送家人端。
+# 注意：回复只发家人端，不向老人播报。M7 前用 --trigger family_query 手动模拟。
+id: family_query
+name: 场景2 · 家人远程询问老人状态
+trigger:
+  - type: manual
+condition:
+  - type: cooldown
+    seconds: 30
+action:
+  - type: skill
+    name: family_status_answer
+mode: single
+priority: 0

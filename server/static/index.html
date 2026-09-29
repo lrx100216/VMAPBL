@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>本地 AI 管家 · 家人端</title>
+<style>
+  :root {
+    --bg: #faf7f2;
+    --card: #ffffff;
+    --ink: #3a342e;
+    --muted: #8a8178;
+    --line: #e8e0d6;
+    --accent: #c0793a;
+    --accent-soft: #f3e4d3;
+    --family: #2f7d5d;
+    --family-soft: #e2efe7;
+    --elder: #3a6ea5;
+    --elder-soft: #e3edf6;
+    --alert: #c0392b;
+    --ok: #2f7d5d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue",
+                 "Microsoft YaHei", sans-serif;
+    font-size: 16px; line-height: 1.5;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+             env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 18px; background: var(--card); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 20px; margin: 0; font-weight: 700; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #bbb; flex: none; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 0 3px #2f7d5d22; }
+  .dot.off { background: var(--alert); }
+  .conn-label { color: var(--muted); font-size: 13px; }
+  main { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; padding: 16px 18px; max-width: 1100px; margin: 0 auto; }
+  @media (max-width: 820px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+  .card h2 { margin: 0 0 10px; font-size: 15px; color: var(--muted); font-weight: 600; letter-spacing: .05em; }
+
+  /* 消息流 */
+  .msgs { height: 58vh; min-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
+  .msg { max-width: 78%; padding: 10px 14px; border-radius: 14px; font-size: 16px; white-space: pre-wrap; word-break: break-word; }
+  .msg .meta { display: block; font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .msg.family { align-self: flex-end; background: var(--family-soft); color: var(--family); border-bottom-right-radius: 4px; }
+  .msg.elder { align-self: flex-start; background: var(--elder-soft); color: var(--elder); border-bottom-left-radius: 4px; }
+  .msg.urgent { outline: 2px solid var(--alert); outline-offset: 1px; }
+  .empty { color: var(--muted); text-align: center; padding: 30px 0; }
+  .send-row { display: flex; gap: 8px; margin-top: 10px; }
+  .send-row input { flex: 1; padding: 11px 13px; font-size: 16px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+  .send-row input:focus { outline: 2px solid var(--accent-soft); }
+
+  /* 状态面板 */
+  .stat-row { display: flex; justify-content: space-between; align-items: center; padding: 9px 2px; border-bottom: 1px dashed var(--line); font-size: 15px; }
+  .stat-row:last-child { border-bottom: none; }
+  .stat-row .k { color: var(--muted); }
+  .stat-row .v { font-weight: 600; }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 600; }
+  .pill.ok { background: var(--ok); color: #fff; }
+  .pill.wait { background: var(--accent-soft); color: var(--accent); }
+  .meds { display: flex; gap: 8px; margin-top: 6px; }
+  .med { flex: 1; text-align: center; padding: 8px 4px; border-radius: 10px; background: #f4efe8; color: var(--muted); font-size: 14px; }
+  .med.done { background: var(--family-soft); color: var(--family); font-weight: 700; }
+
+  /* 缩略图 */
+  .frame-box { width: 100%; aspect-ratio: 16/9; background: #e9e2d8; border-radius: 10px; overflow: hidden; position: relative; }
+  .frame-box img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .frame-box .cap { position: absolute; left: 8px; bottom: 8px; background: #0008; color: #fff; font-size: 12px; padding: 2px 8px; border-radius: 6px; }
+
+  /* 触发按钮 */
+  .triggers { display: flex; flex-wrap: wrap; gap: 8px; }
+  .btn {
+    padding: 10px 16px; font-size: 15px; font-weight: 600; cursor: pointer;
+    border: 1px solid var(--line); background: #fff; color: var(--ink);
+    border-radius: 10px; transition: background .15s, transform .05s;
+  }
+  .btn:hover { background: var(--accent-soft); }
+  .btn:active { transform: scale(.97); }
+  .btn.accent { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.accent:hover { background: #a9662f; }
+
+  /* toast */
+  #toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); background: #3a342e; color: #fff; padding: 10px 18px; border-radius: 10px; font-size: 14px; opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 20; max-width: 84vw; }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>本地 AI 管家 · 家人端</h1>
+  <span class="conn-label" id="connLabel">连接中…</span>
+</header>
+
+<main>
+  <section class="card">
+    <h2>与老人的对话</h2>
+    <div class="msgs" id="msgs">
+      <div class="empty">正在加载消息…</div>
+    </div>
+    <div class="send-row">
+      <input id="msgInput" type="text" maxlength="200" placeholder="给老人留个言，会通过音箱播报出来…">
+      <button class="btn accent" id="sendBtn">发送</button>
+    </div>
+  </section>
+
+  <section style="display:flex; flex-direction:column; gap:16px;">
+    <div class="card">
+      <h2>当前画面</h2>
+      <div class="frame-box">
+        <img id="frame" alt="当前画面">
+        <span class="cap" id="frameCap">…</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>老人状态</h2>
+      <div class="stat-row"><span class="k">画面有人</span><span class="v" id="v-occupancy">—</span></div>
+      <div class="stat-row"><span class="k">最后活动</span><span class="v" id="v-lastmotion">—</span></div>
+      <div class="stat-row"><span class="k">已持续静止</span><span class="v" id="v-still">—</span></div>
+      <div class="stat-row"><span class="k">正在播报</span><span class="v" id="v-speaking">—</span></div>
+      <div class="stat-row"><span class="k">今日吃药</span><span class="v" id="v-meds" style="display:block; width:100%;"></span></div>
+    </div>
+
+    <div class="card">
+      <h2>手动触发场景（调试）</h2>
+      <div class="triggers" id="triggers"><span class="empty">正在加载…</span></div>
+    </div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let ws = null, reconnectDelay = 1000;
+
+/* ---------- 工具 ---------- */
+function fmtTime(ts) {
+  if (!ts) return "暂无记录";
+  const d = new Date(ts * 1000);
+  if (isNaN(d.getTime())) return "—";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toast._h);
+  toast._h = setTimeout(() => t.classList.remove("show"), 2600);
+}
+function escState(html) { /* 纯展示用状态值不走 HTML，统一 textContent */ return html; }
+
+/* ---------- 状态面板 ---------- */
+const MEDS = [["morning", "早"], ["noon", "中"], ["evening", "晚"]];
+function renderState(s) {
+  const pill = (cond, onTxt, offTxt) => cond
+    ? `<span class="pill ok">${onTxt}</span>` : `<span class="pill wait">${offTxt}</span>`;
+  $("v-occupancy").innerHTML = pill(s.occupancy, "有人", "无人");
+  $("v-lastmotion").textContent = fmtTime(s.last_motion_ts);
+  $("v-still").innerHTML = pill(s.is_still, "已静止", "活动中");
+  $("v-speaking").innerHTML = pill(s.speaking, "播报中", "空闲");
+  const meds = (s.medication_taken || {});
+  $("v-meds").innerHTML = "";
+  const wrap = $("v-meds");
+  MEDS.forEach(([slot, label]) => {
+    const d = document.createElement("span");
+    d.className = "med" + (meds[slot] ? " done" : "");
+    d.textContent = label + (meds[slot] ? " 已吃" : " 未吃");
+    wrap.appendChild(d);
+  });
+}
+
+/* ---------- 消息流 ---------- */
+function addMessage(m, prepend) {
+  const box = $("msgs");
+  const empty = box.querySelector(".empty");
+  if (empty) empty.remove();
+  const div = document.createElement("div");
+  const isFamily = m.direction === "to_family";
+  div.className = "msg " + (isFamily ? "family" : "elder") + (m.urgent ? " urgent" : "");
+  const label = isFamily
+    ? `${m.sender || "老人"} → ${m.recipient || "家人"}`
+    : `${m.sender || "家人"} → ${m.recipient || "老人"}`;
+  div.textContent = m.text;
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  meta.textContent = `${label} · ${fmtTime(m.ts)}`;
+  div.appendChild(meta);
+  if (prepend) box.prepend(div);
+  else box.appendChild(div);
+  if (!prepend) box.scrollTop = box.scrollHeight;
+}
+
+/* ---------- REST ---------- */
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url} → ${r.status}`);
+  return r.json();
+}
+async function postJSON(url, body) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : "{}",
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`${r.status} ${t}`);
+  }
+  return r.json();
+}
+
+async function loadState() { try { renderState(await getJSON("/api/state")); } catch (e) { toast("状态加载失败"); } }
+async function loadMessages() {
+  try {
+    const msgs = await getJSON("/api/messages?limit=30");
+    $("msgs").innerHTML = msgs.length
+      ? "" : `<div class="empty">还没有消息</div>`;
+    msgs.slice().reverse().forEach((m) => addMessage(m, false));
+  } catch (e) { toast("消息加载失败"); }
+}
+async function loadScenes() {
+  try {
+    const scenes = await getJSON("/api/scenes");
+    const wrap = $("triggers");
+    wrap.innerHTML = "";
+    scenes.forEach((s) => {
+      const b = document.createElement("button");
+      b.className = "btn";
+      b.textContent = `${s.name}`;
+      b.title = `手动触发 ${s.id}`;
+      b.onclick = async () => {
+        b.disabled = true;
+        try {
+          const r = await postJSON(`/api/trigger/${encodeURIComponent(s.id)}`);
+          toast(r.ran ? "已执行 ✅" : "被拦截 ❌（冷却/条件/重入）");
+        } catch (e) { toast("触发失败：后端异常"); }
+        b.disabled = false;
+      };
+      wrap.appendChild(b);
+    });
+  } catch (e) { toast("场景加载失败"); }
+}
+
+/* ---------- 缩略图轮询 ---------- */
+let frameTimer = null;
+async function tickFrame() {
+  try {
+    const d = await getJSON("/api/frame");
+    if (d.ok) {
+      $("frame").src = "data:image/jpeg;base64," + d.jpeg_b64;
+      $("frameCap").textContent = fmtTime(d.ts);
+    }
+  } catch (e) { /* 后端没起感知时静默 */ }
+}
+
+/* ---------- WebSocket ---------- */
+function connectWS() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = () => {
+    $("dot").className = "dot on";
+    $("connLabel").textContent = "已连接";
+    reconnectDelay = 1000;
+  };
+  ws.onclose = () => {
+    $("dot").className = "dot off";
+    $("connLabel").textContent = "已断开，重连中…";
+    setTimeout(connectWS, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 15000);
+  };
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.type === "hello") { renderState(msg.state); return; }
+    if (msg.type === "notify.family") {
+      const p = msg.payload || {};
+      addMessage({
+        direction: "to_family",
+        text: p.msg, urgent: !!p.urgent,
+        sender: "老人", recipient: "家人",
+        ts: msg.ts,
+      }, false);
+      if (p.urgent) toast("⚠ 收到紧急消息");
+      return;
+    }
+    if (msg.type && msg.type.startsWith("state.")) {
+      // 状态变化：直接拉全量快照刷新（局部 new 可能是标量，渲染会失真）
+      loadState();
+    }
+  };
+}
+
+/* ---------- 事件绑定 ---------- */
+function sendToElder() {
+  const text = $("msgInput").value.trim();
+  if (!text) return;
+  postJSON("/api/msg_to_elder", { text })
+    .then(() => {
+      $("msgInput").value = "";
+      toast("已发送，将通过音箱播报");
+      setTimeout(loadMessages, 600);
+    })
+    .catch((e) => toast("发送失败"));
+}
+$("sendBtn").onclick = sendToElder;
+$("msgInput").addEventListener("keydown", (e) => { if (e.key === "Enter") sendToElder(); });
+
+/* ---------- 启动 ---------- */
+loadState(); loadMessages(); loadScenes(); connectWS();
+frameTimer = setInterval(tickFrame, 3000);
+tickFrame();
+</script>
+</body>
+</html>
