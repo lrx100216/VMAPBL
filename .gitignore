@@ -24,3 +24,5 @@ __pycache__/
 # 测试临时产物与外部工具目录（非项目源码）
 .pytest_tmp/
 .workbuddy/
+*.ses
+

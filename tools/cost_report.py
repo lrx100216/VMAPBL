@@ -131,11 +131,12 @@ def main() -> int:
               f"p{r['prompt_tokens']}/c{r['completion_tokens']} "
               f"¥{r['cost_cny']:.4f}")
 
-    print("\n各场景决策事件（trigger_fire 触发 / done 成功 / error 异常）：")
+    print("\n各场景决策事件（trigger 触发 / done 成功 / error 异常）：")
     ev = d["per_scene_events"]
     for sid in sorted(ev):
         k = ev[sid]
-        print(f"  {sid:20s} 触发 {k.get('trigger_fire', 0):4d}  "
+        trig_n = k.get("trigger", 0) or k.get("trigger_fire", 0)
+        print(f"  {sid:20s} 触发 {trig_n:4d}  "
               f"成功 {k.get('done', 0):4d}  异常 {k.get('error', 0):4d}  "
               f"跳过 {k.get('skipped', 0):4d}")
 

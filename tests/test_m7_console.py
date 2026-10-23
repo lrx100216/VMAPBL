@@ -277,3 +277,89 @@ def test_ws_disconnect_cleans_consumer(tmp_path):
             assert app.state.hub.active
         # 退出 with：ws 已断开
     assert not app.state.hub.active
+
+
+# ---------- ROI 标定 / AI 自动标定 / 本地意图快速通道 ----------
+
+async def test_api_roi_crud_and_auto(tmp_path, monkeypatch):
+    """Web 端 ROI 多边形增删查与 AI 自动标定端点测试（不改真实 settings.yaml）。"""
+    from core import config
+    from skills import vision
+    from tools import calibrate_roi
+
+    fake_settings = tmp_path / "settings.yaml"
+    fake_settings.write_text("# 注释保留测试\nroi:\n  door_inside: []\n", encoding="utf-8")
+    monkeypatch.setattr(config, "_SETTINGS_PATH", fake_settings)
+    monkeypatch.setattr(calibrate_roi, "SETTINGS", fake_settings)
+    config.reload_settings()
+
+    monkeypatch.setattr(vision, "grab_frame",
+                        lambda *a, **kw: np.zeros((480, 640, 3), np.uint8))
+
+    async def fake_json_call(frame, prompt, schema, **kw):
+        return {
+            "uncertain": False,
+            "door_inside": [[100, 200], [500, 200], [500, 800], [100, 800]],
+            "door_outside": [[0, 100], [200, 100], [200, 700], [0, 700]],
+            "bed": [[500, 300], [900, 300], [900, 900], [500, 900]],
+        }
+
+    monkeypatch.setattr(vision, "json_call", fake_json_call)
+
+    try:
+        engine, st, log = _real_engine(tmp_path)
+        app = create_app(state=st, engine=engine, log=log)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://test") as c:
+            r0 = await c.get("/api/roi")
+            assert r0.status_code == 200 and r0.json()["roi"] == {}
+
+            # 手动保存多边形
+            pts = [[10, 20], [110, 20], [110, 120], [10, 120]]
+            r1 = await c.post("/api/roi/bed", json={"points": pts})
+            assert r1.status_code == 200
+            assert r1.json()["roi"]["bed"] == pts
+            assert config.settings()["roi"]["bed"] == pts
+
+            # 点数不足 3 个应报 422
+            r_bad = await c.post("/api/roi/bed", json={"points": [[1, 2], [3, 4]]})
+            assert r_bad.status_code == 422
+
+            # 清空该区
+            r_del = await c.delete("/api/roi/bed")
+            assert r_del.status_code == 200
+            assert "bed" not in r_del.json()["roi"]
+
+            # AI 自动标定（0..1000 归一化坐标自动映射到 640x480 像素坐标）
+            r_auto = await c.post("/api/roi_auto", json={})
+            assert r_auto.status_code == 200
+            auto_roi = r_auto.json()["roi"]
+            assert {"door_inside", "door_outside", "bed"} <= set(auto_roi.keys())
+            assert auto_roi["bed"][0] == [320, 144]  # 500/1000*640=320, 300/1000*480=144
+            assert "# 注释保留测试" in fake_settings.read_text(encoding="utf-8")
+    finally:
+        monkeypatch.undo()
+        config.reload_settings()
+
+
+async def test_intent_local_fast_path(monkeypatch):
+    """高频读字/传话口令走 0ms 本地规则直通，不触发云端 LLM。"""
+    from skills import intent
+
+    called_llm = False
+
+    async def boom_chat_json(*a, **kw):
+        nonlocal called_llm
+        called_llm = True
+        return {"intent": "chat"}
+
+    monkeypatch.setattr(intent, "chat_json", boom_chat_json)
+
+    r_photo = await intent.classify("小管家，帮我念一下药盒上写的什么字")
+    assert r_photo == "photo"
+    assert called_llm is False
+
+    r_msg = await intent.classify("给闺女带个话，晚上回家吃饭")
+    assert r_msg == "message"
+    assert called_llm is False
+

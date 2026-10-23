@@ -69,10 +69,16 @@
   .med { flex: 1; text-align: center; padding: 8px 4px; border-radius: 10px; background: #f4efe8; color: var(--muted); font-size: 14px; }
   .med.done { background: var(--family-soft); color: var(--family); font-weight: 700; }
 
-  /* 缩略图 */
-  .frame-box { width: 100%; aspect-ratio: 16/9; background: #e9e2d8; border-radius: 10px; overflow: hidden; position: relative; }
-  .frame-box img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .frame-box .cap { position: absolute; left: 8px; bottom: 8px; background: #0008; color: #fff; font-size: 12px; padding: 2px 8px; border-radius: 6px; }
+  /* 缩略图与 ROI 画布 */
+  .frame-box { width: 100%; aspect-ratio: 16/9; background: #e9e2d8; border-radius: 10px; overflow: hidden; position: relative; user-select: none; }
+  .frame-box img { width: 100%; height: 100%; object-fit: fill; display: block; }
+  .frame-box canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .frame-box canvas.drawing { pointer-events: auto; cursor: crosshair; }
+  .frame-box .cap { position: absolute; left: 8px; bottom: 8px; background: #0008; color: #fff; font-size: 12px; padding: 2px 8px; border-radius: 6px; pointer-events: none; }
+  .roi-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px; font-size: 13px; }
+  .roi-bar select { padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: #fff; font-size: 13px; color: var(--ink); font-weight: 600; }
+  .btn.sm { padding: 6px 11px; font-size: 13px; border-radius: 8px; }
+  .roi-hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
 
   /* 触发按钮 */
   .triggers { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -112,11 +118,25 @@
 
   <section style="display:flex; flex-direction:column; gap:16px;">
     <div class="card">
-      <h2>当前画面</h2>
-      <div class="frame-box">
+      <h2>当前画面 · 区域标定 (ROI)</h2>
+      <div class="frame-box" id="frameBox">
         <img id="frame" alt="当前画面">
+        <canvas id="roiCanvas"></canvas>
         <span class="cap" id="frameCap">…</span>
       </div>
+      <div class="roi-bar">
+        <select id="roiSelect" title="选择要标定的区域">
+          <option value="door_inside">门内区 (door_inside)</option>
+          <option value="door_outside">门外区 (door_outside)</option>
+          <option value="bed">床/休息区 (bed)</option>
+        </select>
+        <button class="btn sm" id="roiDrawBtn">✏️ 手动画点</button>
+        <button class="btn sm accent" id="roiSaveBtn" style="display:none;">💾 保存多边形</button>
+        <button class="btn sm" id="roiCancelBtn" style="display:none;">取消</button>
+        <button class="btn sm" id="roiClearBtn" title="清除当前选中区域的多边形">🗑️ 清空该区</button>
+        <button class="btn sm" id="roiAutoBtn" title="使用视觉大模型自动标定门内、门外、床区">✨ AI 自动标定</button>
+      </div>
+      <div class="roi-hint" id="roiHint">已标定多边形会自动叠加显示在画面上；支持手动画点或 AI 一键标定（热生效，无需重启）。</div>
     </div>
 
     <div class="card">
@@ -218,6 +238,11 @@ async function postJSON(url, body) {
   }
   return r.json();
 }
+async function deleteJSON(url) {
+  const r = await fetch(url, { method: "DELETE" });
+  if (!r.ok) throw new Error(`${url} → ${r.status}`);
+  return r.json();
+}
 
 async function loadState() { try { renderState(await getJSON("/api/state")); } catch (e) { toast("状态加载失败"); } }
 async function loadMessages() {
@@ -251,16 +276,183 @@ async function loadScenes() {
   } catch (e) { toast("场景加载失败"); }
 }
 
-/* ---------- 缩略图轮询 ---------- */
+/* ---------- 缩略图轮询 & ROI 交互画布 ---------- */
 let frameTimer = null;
+let frameBusy = false;
+let frameOrigW = 1280, frameOrigH = 720;
+let savedRois = {};
+let drawingRoi = false;
+let draftPts = []; // 存原始相机像素坐标 [[x, y], ...]
+
+const ROI_COLORS = {
+  door_inside:  { stroke: "#2ecc71", fill: "rgba(46, 204, 113, 0.22)", label: "门内" },
+  door_outside: { stroke: "#e67e22", fill: "rgba(230, 126, 34, 0.22)", label: "门外" },
+  bed:          { stroke: "#3498db", fill: "rgba(52, 152, 219, 0.22)", label: "床区" },
+};
+
+function renderRoiCanvas() {
+  const cvs = $("roiCanvas");
+  const box = $("frameBox");
+  const rect = box.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  if (cvs.width !== Math.round(rect.width) || cvs.height !== Math.round(rect.height)) {
+    cvs.width = Math.round(rect.width);
+    cvs.height = Math.round(rect.height);
+  }
+  const ctx = cvs.getContext("2d");
+  ctx.clearRect(0, 0, cvs.width, cvs.height);
+  const sx = cvs.width / (frameOrigW || 1280);
+  const sy = cvs.height / (frameOrigH || 720);
+
+  // 画已保存的多边形
+  Object.entries(savedRois).forEach(([name, pts]) => {
+    if (!Array.isArray(pts) || pts.length < 3) return;
+    if (drawingRoi && name === $("roiSelect").value && draftPts.length > 0) return;
+    const style = ROI_COLORS[name] || { stroke: "#9b59b6", fill: "rgba(155,89,182,0.2)", label: name };
+    ctx.beginPath();
+    pts.forEach(([x, y], idx) => {
+      const cx = x * sx, cy = y * sy;
+      if (idx === 0) ctx.moveTo(cx, cy);
+      else ctx.lineTo(cx, cy);
+    });
+    ctx.closePath();
+    ctx.fillStyle = style.fill;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = style.stroke;
+    ctx.stroke();
+    // 标签
+    const [fx, fy] = pts[0];
+    ctx.font = "bold 12px sans-serif";
+    ctx.fillStyle = style.stroke;
+    ctx.fillText(style.label, Math.max(4, fx * sx + 4), Math.max(14, fy * sy + 14));
+  });
+
+  // 画正在手绘的多边形草稿
+  if (drawingRoi && draftPts.length > 0) {
+    ctx.beginPath();
+    draftPts.forEach(([x, y], idx) => {
+      const cx = x * sx, cy = y * sy;
+      if (idx === 0) ctx.moveTo(cx, cy);
+      else ctx.lineTo(cx, cy);
+    });
+    if (draftPts.length >= 3) {
+      ctx.closePath();
+      ctx.fillStyle = "rgba(231, 76, 60, 0.25)";
+      ctx.fill();
+    }
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#e74c3c";
+    ctx.stroke();
+    draftPts.forEach(([x, y]) => {
+      ctx.beginPath();
+      ctx.arc(x * sx, y * sy, 4, 0, Math.PI * 2);
+      ctx.fillStyle = "#e74c3c";
+      ctx.fill();
+    });
+  }
+}
+
+async function loadRois() {
+  try {
+    const r = await getJSON("/api/roi");
+    if (r.ok) {
+      savedRois = r.roi || {};
+      renderRoiCanvas();
+    }
+  } catch (e) { /* 静默 */ }
+}
+
+function setDrawingMode(on) {
+  drawingRoi = on;
+  draftPts = [];
+  const cvs = $("roiCanvas");
+  cvs.classList.toggle("drawing", on);
+  $("roiDrawBtn").style.display = on ? "none" : "";
+  $("roiSaveBtn").style.display = on ? "" : "none";
+  $("roiCancelBtn").style.display = on ? "" : "none";
+  $("roiHint").textContent = on
+    ? `正在标定「${$("roiSelect").value}」：在画面上左键点击添加顶点（至少 3 个），点「保存多边形」生效。`
+    : "已标定多边形会自动叠加显示在画面上；支持手动画点或 AI 一键标定（热生效，无需重启）。";
+  renderRoiCanvas();
+}
+
+$("roiDrawBtn").onclick = () => setDrawingMode(true);
+$("roiCancelBtn").onclick = () => setDrawingMode(false);
+$("roiCanvas").addEventListener("click", (e) => {
+  if (!drawingRoi) return;
+  const rect = $("roiCanvas").getBoundingClientRect();
+  const x = Math.round(((e.clientX - rect.left) / rect.width) * frameOrigW);
+  const y = Math.round(((e.clientY - rect.top) / rect.height) * frameOrigH);
+  draftPts.push([x, y]);
+  $("roiHint").textContent = `已添加 ${draftPts.length} 个顶点 ${draftPts.length >= 3 ? "（可点击保存）" : "（还需至少 " + (3 - draftPts.length) + " 个点）"}`;
+  renderRoiCanvas();
+});
+
+$("roiSaveBtn").onclick = async () => {
+  const name = $("roiSelect").value;
+  if (draftPts.length < 3) {
+    toast("请至少在画面上点击 3 个顶点");
+    return;
+  }
+  try {
+    const r = await postJSON(`/api/roi/${encodeURIComponent(name)}`, { points: draftPts });
+    savedRois = r.roi || {};
+    setDrawingMode(false);
+    toast(`已保存「${name}」多边形并实时生效 ✅`);
+  } catch (e) {
+    toast("保存 ROI 失败");
+  }
+};
+
+$("roiClearBtn").onclick = async () => {
+  const name = $("roiSelect").value;
+  try {
+    const r = await deleteJSON(`/api/roi/${encodeURIComponent(name)}`);
+    savedRois = r.roi || {};
+    setDrawingMode(false);
+    toast(`已清空「${name}」区域`);
+  } catch (e) {
+    toast("清空 ROI 失败");
+  }
+};
+
+$("roiAutoBtn").onclick = async () => {
+  const btn = $("roiAutoBtn");
+  btn.disabled = true;
+  btn.textContent = "⏳ AI 识别中…";
+  try {
+    const r = await postJSON("/api/roi_auto", {});
+    savedRois = r.roi || {};
+    setDrawingMode(false);
+    renderRoiCanvas();
+    toast("AI 自动标定完成，已实时生效 ✨");
+  } catch (e) {
+    toast("AI 自动标定失败（请检查画面或网络）");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "✨ AI 自动标定";
+  }
+};
+
+window.addEventListener("resize", renderRoiCanvas);
+
 async function tickFrame() {
+  if (frameBusy) return;
+  frameBusy = true;
   try {
     const d = await getJSON("/api/frame");
     if (d.ok) {
+      if (d.width && d.height) {
+        frameOrigW = d.width;
+        frameOrigH = d.height;
+      }
       $("frame").src = "data:image/jpeg;base64," + d.jpeg_b64;
       $("frameCap").textContent = fmtTime(d.ts);
+      renderRoiCanvas();
     }
   } catch (e) { /* 后端没起感知时静默 */ }
+  finally { frameBusy = false; }
 }
 
 /* ---------- WebSocket ---------- */
@@ -316,8 +508,8 @@ $("sendBtn").onclick = sendToElder;
 $("msgInput").addEventListener("keydown", (e) => { if (e.key === "Enter") sendToElder(); });
 
 /* ---------- 启动 ---------- */
-loadState(); loadMessages(); loadScenes(); connectWS();
-frameTimer = setInterval(tickFrame, 3000);
+loadState(); loadMessages(); loadScenes(); loadRois(); connectWS();
+frameTimer = setInterval(tickFrame, 1000);
 tickFrame();
 </script>
 </body>

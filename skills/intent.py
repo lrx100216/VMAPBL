@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from skills.llm import chat_json
 
 _PROMPT = """你在为一个独居老人的语音管家做意图分类。老人刚说的话如下：
@@ -18,11 +20,41 @@ _PROMPT = """你在为一个独居老人的语音管家做意图分类。老人�
 只输出 JSON：{{"intent": "message|photo|chat"}}"""
 
 
+_PHOTO_KEYWORDS = (
+    "念一下", "读一下", "什么字", "写着什么", "写的什么", "写的啥", "上面写",
+    "纸上", "药盒", "说明书", "怎么吃", "吃几次", "吃几粒", "保质期", "有效期",
+    "帮我念", "帮我读", "念念", "看看这上面",
+)
+_MESSAGE_PATTERN = re.compile(
+    r"(发(个)?消息|带(个)?话|转告|留(个)?言|回(个)?电话"
+    r"|(告诉|跟|给|让)(我)?(儿子|女儿|闺女|老伴|孙子|孙女|家人|孩子))")
+
+
+def classify_local(text: str) -> str | None:
+    """0ms 本地规则快筛：明确命中读字或传话指令时直接返回，省去一次 3~6s 云端调用。"""
+    t = (text or "").strip()
+    if not t:
+        return "chat"
+    has_photo = any(k in t for k in _PHOTO_KEYWORDS) or (
+        ("念" in t or "读" in t) and ("字" in t or "纸" in t or "药" in t or "上面" in t)
+    )
+    has_msg = bool(_MESSAGE_PATTERN.search(t))
+    if has_photo and not has_msg:
+        return "photo"
+    if has_msg and not has_photo:
+        return "message"
+    return None
+
+
 async def classify(text: str) -> str:
-    """把一句识别文本分类为 message / photo / chat；任何失败返回 "chat"。"""
+    """把一句识别文本分类为 message / photo / chat；本地快筛优先，模糊时走云端兜底。"""
     text = (text or "").strip()
     if not text:
         return "chat"
-    data = await chat_json(_PROMPT.format(text=text), scene_id="intent")
+    fast = classify_local(text)
+    if fast is not None:
+        return fast
+    data = await chat_json(_PROMPT.format(text=text), scene_id="intent",
+                           max_tokens=256)
     intent = str(data.get("intent", "chat"))
     return intent if intent in ("message", "photo", "chat") else "chat"

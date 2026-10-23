@@ -95,6 +95,15 @@ class PoseEstimator:
         return self.loaded_path is not None and \
             self.loaded_path.suffix == ".mlpackage"
 
+    def warmup(self) -> None:
+        """启动期预热：加载模型并跑一帧空白图完成 CoreML/PyTorch 算子编译，消除首帧卡顿。"""
+        try:
+            self._ensure_loaded()
+            dummy = np.zeros((64, 64, 3), dtype=np.uint8)
+            self._model.predict(dummy, conf=self.conf, verbose=False)
+        except Exception as e:
+            log.warning("姿态模型预热跳过：%s", e)
+
     def infer(self, frame_bgr: np.ndarray) -> list[PersonPose]:
         """对一帧做姿态估计，返回 0..N 个人。任何推理异常都上抛给调用方记录。"""
         self._ensure_loaded()

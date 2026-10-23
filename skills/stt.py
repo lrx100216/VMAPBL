@@ -26,6 +26,7 @@ from sensors.microphone import Microphone
 from sensors.vad import VadStream
 
 _MODEL: WhisperModel | None = None
+_listen_lock = asyncio.Lock()
 
 
 def _stt_settings() -> dict:
@@ -47,6 +48,16 @@ def _get_model() -> WhisperModel:
         )
         print(f"[stt] 模型就绪（{time.time() - t0:.1f}s，已常驻内存）")
     return _MODEL
+
+
+def warmup() -> None:
+    """启动期预热 VAD 与 Whisper 模型，避免第一次说话识别时卡顿。"""
+    try:
+        from sensors.vad import _get_model as _get_vad
+        _get_vad()
+        _get_model()
+    except Exception as e:
+        print(f"[stt] 语音模型预热跳过：{e}")
 
 
 def _transcribe_sync(seg_16k: np.ndarray) -> str:
@@ -97,7 +108,8 @@ async def listen(timeout_s: float | None = None) -> str:
     if timeout_s is None:
         timeout_s = float(_stt_settings().get("timeout_s", 8.0))
     try:
-        seg = await record_utterance(timeout_s)
+        async with _listen_lock:
+            seg = await record_utterance(timeout_s)
         if seg is None or seg.size < 1600:  # 短于 0.1s 不送识别
             return ""
         loop = asyncio.get_running_loop()

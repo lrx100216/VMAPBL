@@ -175,9 +175,9 @@ async def run_perception(*, camera: Camera | None = None,
             if motion_active:
                 st.last_motion_ts = ts  # 高频字段：直接写，不发事件（见模块docstring）
             if motion_active != prev_motion:
-                await bus.publish({"type": "sensor.motion", "ts": ts,
-                                   "payload": {"active": motion_active,
-                                               "ratio": round(ratio, 4)}})
+                bus.publish_nowait({"type": "sensor.motion", "ts": ts,
+                                    "payload": {"active": motion_active,
+                                                "ratio": round(ratio, 4)}})
                 _log_line(f"运动 {'开始' if motion_active else '停止'}"
                           f"（前景占比 {ratio:.1%}）")
             prev_motion = motion_active
@@ -223,16 +223,16 @@ async def run_perception(*, camera: Camera | None = None,
                 if quiet_since is not None:
                     spike = mhist.peak_between(quiet_since - spike_window_s,
                                                quiet_since)
-                await bus.publish({"type": "sensor.still", "ts": ts,
-                                   "payload": {"after_s": still.still_seconds,
-                                               "pre_quiet_spike": round(spike, 4)}})
+                bus.publish_nowait({"type": "sensor.still", "ts": ts,
+                                    "payload": {"after_s": still.still_seconds,
+                                                "pre_quiet_spike": round(spike, 4)}})
                 _log_line(f"持续静止 {still.still_seconds:.0f}s → is_still=True"
                           f"（静止前峰值 {spike:.1%}，已发 sensor.still）")
                 if spike >= spike_ratio and st.occupancy:
-                    await bus.publish({"type": "sensor.sudden_still", "ts": ts,
-                                       "payload": {"after_s": still.still_seconds,
-                                                   "spike_ratio": round(spike, 4),
-                                                   "quiet_since": quiet_since}})
+                    bus.publish_nowait({"type": "sensor.sudden_still", "ts": ts,
+                                        "payload": {"after_s": still.still_seconds,
+                                                    "spike_ratio": round(spike, 4),
+                                                    "quiet_since": quiet_since}})
                     _log_line(f"运动突变后静止（峰值 {spike:.1%} ≥ "
                               f"{spike_ratio:.0%}）→ sensor.sudden_still")
             elif not still.is_still and st.is_still:
@@ -241,6 +241,7 @@ async def run_perception(*, camera: Camera | None = None,
 
             if max_frames is not None and frames >= max_frames:
                 break
+        await asyncio.sleep(0)  # 让尾帧 publish_nowait 派发的任务在清历史前启动
     finally:
         clear_current()
         if own_camera:

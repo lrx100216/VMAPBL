@@ -101,21 +101,106 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
 
     @app.get("/api/frame")
     async def api_frame(max_edge: int = 480) -> dict:
-        """当前画面缩略图：JPEG base64（复用 vision.grab_frame，感知回路
-        在跑时直接取它的最新帧，不二次开摄像头）。"""
+        """当前画面缩略图：JPEG base64（感知回路在跑且请求默认 480 边长时直接复用
+        Camera._latest_jpeg 零拷贝缓存；否则退回 vision.grab_frame）。"""
+        from sensors.camera import get_current
         from skills import vision
-        loop = asyncio.get_running_loop()
         edge = max(80, min(max_edge, 960))   # 钳制范围，拒绝非法参数
+        cam = get_current()
+        if cam is not None and cam.started and edge == 480:
+            cached = cam.latest_jpeg()
+            if cached is not None:
+                ts, jpg_bytes, orig_w, orig_h = cached
+                return {
+                    "ok": True,
+                    "ts": ts,
+                    "width": orig_w,
+                    "height": orig_h,
+                    "jpeg_b64": base64.b64encode(jpg_bytes).decode(),
+                }
+        loop = asyncio.get_running_loop()
         frame = await loop.run_in_executor(None, vision.grab_frame, edge)
         if frame is None:
             return {"ok": False, "reason": "无画面可用", "ts": time.time()}
+        h, w = frame.shape[:2]
+        if cam is not None and cam.started:
+            latest_raw = cam.latest()
+            if latest_raw is not None:
+                h, w = latest_raw[1].shape[:2]
         ok, jpg = cv2.imencode(
             ".jpg", frame,
             [cv2.IMWRITE_JPEG_QUALITY, 60])
         if not ok:
             return {"ok": False, "reason": "编码失败", "ts": time.time()}
-        return {"ok": True, "ts": time.time(),
-                "jpeg_b64": base64.b64encode(jpg.tobytes()).decode()}
+        return {
+            "ok": True,
+            "ts": time.time(),
+            "width": int(w),
+            "height": int(h),
+            "jpeg_b64": base64.b64encode(jpg.tobytes()).decode(),
+        }
+
+    @app.get("/api/roi")
+    async def api_roi_get() -> dict:
+        """读取当前全部 ROI 多边形配置。"""
+        from core import config
+        roi = config.settings().get("roi") or {}
+        return {"ok": True, "roi": {k: list(v) for k, v in roi.items() if v}}
+
+    @app.post("/api/roi/{name}")
+    async def api_roi_save(name: str, body: dict = Body(...)) -> dict:
+        """保存单个 ROI 多边形并热重载 settings()。"""
+        import re
+        from core import config
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise HTTPException(status_code=422, detail="ROI 名称不合法")
+        pts = body.get("points")
+        if not isinstance(pts, list) or len(pts) < 3:
+            raise HTTPException(status_code=422, detail="多边形至少需要 3 个顶点")
+        try:
+            saved = config.save_roi(name, pts)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"保存 ROI 失败: {e}")
+        roi = config.settings().get("roi") or {}
+        return {
+            "ok": True,
+            "name": name,
+            "points": saved,
+            "roi": {k: list(v) for k, v in roi.items() if v},
+        }
+
+    @app.delete("/api/roi/{name}")
+    async def api_roi_delete(name: str) -> dict:
+        """清空/删除指定 ROI 多边形并热重载 settings()。"""
+        from core import config
+        config.delete_roi(name)
+        roi = config.settings().get("roi") or {}
+        return {
+            "ok": True,
+            "name": name,
+            "roi": {k: list(v) for k, v in roi.items() if v},
+        }
+
+    @app.post("/api/roi_auto")
+    async def api_roi_auto(body: dict = Body(default={})) -> dict:
+        """使用视觉大模型自动标定 ROI 多边形并热重载。"""
+        from core import config
+        from tools.calibrate_roi import DEFAULT_TARGETS, auto_calibrate_rois
+        raw_targets = body.get("targets")
+        if isinstance(raw_targets, list) and raw_targets:
+            targets = tuple(str(t) for t in raw_targets)
+        else:
+            targets = DEFAULT_TARGETS
+        try:
+            calibrated = await auto_calibrate_rois(targets=targets, save=True)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"AI 自动标定失败: {e}")
+        roi = config.settings().get("roi") or {}
+        return {
+            "ok": True,
+            "calibrated": calibrated,
+            "roi": {k: list(v) for k, v in roi.items() if v},
+        }
 
     @app.get("/api/events")
     async def api_events(scene_id: str | None = None,

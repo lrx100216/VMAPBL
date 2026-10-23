@@ -179,8 +179,8 @@ async def medication_watch(ctx: dict, slot: str = "morning") -> str:
     stage1: deque[bool] = deque(maxlen=vote_frames)
     stage2: deque[bool] = deque(maxlen=vote_frames)
     stage1_done = False
-    pose = _get_pose()
     log = default_log()
+    from sensors import perception as _perc
     while time.monotonic() < deadline:
         frame = await loop.run_in_executor(None, _grab)
         if frame is None:
@@ -195,7 +195,15 @@ async def medication_watch(ctx: dict, slot: str = "morning") -> str:
                     log.log_event("medication", "pillbox_present",
                                   {"slot": slot})
         else:
-            persons = await loop.run_in_executor(None, pose.infer, frame)
+            # 优先复用感知主循环最新姿态（省去双开 YOLO 模型争抢 CPU/ANE）；
+            # 若单测注入了 _pose 或感知未运行，则退回独立推理。
+            hist = _perc.pose_history() if _pose is None else None
+            latest_pose = hist.latest() if hist is not None else None
+            if latest_pose is not None and (time.time() - latest_pose[0]) <= 2.5:
+                persons = [latest_pose[1]]
+            else:
+                pose = _get_pose()
+                persons = await loop.run_in_executor(None, pose.infer, frame)
             stage2.append(_wrist_near_box(persons, boxes, dilate, kp_conf))
             if _vote_pass(stage2, vote_min):
                 _get_state().mark_medication(slot, True)

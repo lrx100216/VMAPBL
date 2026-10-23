@@ -42,6 +42,7 @@ async def _voice_loop(engine: SceneEngine) -> int:
     from skills.intent import classify
 
     engine.wire_speech_triggers()
+    await asyncio.get_running_loop().run_in_executor(None, stt.warmup)
     print("🎙 语音模式已启动。直接说话即可，Ctrl+C 退出。")
     print("  可以试试：「给儿子发消息说我晚上过去吃饭」（场景1）")
     print("       或：「帮我念一下这张纸上写的什么」（场景8）")
@@ -75,18 +76,22 @@ async def _perceive_loop(engine: SceneEngine) -> int:
     M6 起：运动突变后静止会触发场景7 跌倒检测（sensor.sudden_still）。
     """
     from sensors.perception import run_perception
+    from sensors.pose import PoseEstimator
     from core import config as _cfg
 
     engine.wire_state_triggers()
     engine.wire_event_triggers()
     engine.wire_time_triggers()
+    pose_est = PoseEstimator()
+    print("⏳ 正在预热姿态模型（消除运行期首帧卡顿）……", flush=True)
+    await asyncio.get_running_loop().run_in_executor(None, pose_est.warmup)
     print("👁 感知模式已启动，Ctrl+C 退出。"
           f"视频源：{_cfg.video_source()!r}（文件路径即离线回放）")
     print("  场景触发器已接线：state（场景3）/ event sensor.still（场景6）"
           "+ sensor.sudden_still（场景7）/ time 08:30+09:00（场景5）"
           "+ 09:30（场景4）")
     try:
-        await run_perception()
+        await run_perception(pose=pose_est)
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n感知模式退出。")
     finally:
@@ -106,6 +111,7 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
 
     from core import config as _cfg
     from sensors.perception import run_perception
+    from sensors.pose import PoseEstimator
     from server.app import create_app
     from server.push import PushHub
 
@@ -113,6 +119,10 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
     engine.wire_event_triggers()
     engine.wire_time_triggers()
     engine.wire_speech_triggers()
+
+    pose_est = PoseEstimator()
+    print("⏳ 正在预热姿态模型（消除运行期首帧卡顿）……", flush=True)
+    await asyncio.get_running_loop().run_in_executor(None, pose_est.warmup)
 
     hub = PushHub()
     app = create_app(state=state, engine=engine, log=log, hub=hub)
@@ -130,7 +140,7 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
     print(f"🌐 家人端控制台：http://{host}:{port}")
     print("   感知回路与场景触发器已在线，Ctrl+C 退出")
     try:
-        await run_perception()
+        await run_perception(pose=pose_est)
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n服务退出。")
     finally:

@@ -37,6 +37,7 @@ class Camera:
         maxlen = max(1, int(round(self.fps * self.ring_seconds)))
         self._ring: deque[tuple[float, bytes]] = deque(maxlen=maxlen)
         self._latest: tuple[float, np.ndarray] | None = None
+        self._latest_jpeg: tuple[float, bytes, int, int] | None = None
         self._lock = threading.Lock()
         self._cap: cv2.VideoCapture | None = None
         self._thread: threading.Thread | None = None
@@ -86,6 +87,7 @@ class Camera:
         self.eof = False
         with self._lock:
             self._latest = None
+            self._latest_jpeg = None
             self._ring.clear()
         self._thread = threading.Thread(target=self._run, name="camera",
                                         daemon=True)
@@ -99,6 +101,10 @@ class Camera:
         file_fps = self._cap.get(cv2.CAP_PROP_FPS) if self.source_is_file else 0
         pace_fps = file_fps if file_fps and file_fps > 1 else self.fps
         interval = 1.0 / pace_fps
+        frame_idx = 0
+        # 实时源每 3 帧（10fps）编码一次 JPEG 进环形缓冲与前端缓存，省 67% CPU/内存；
+        # 文件回放源每帧都编码，保证短素材离线回放帧数精确。
+        encode_stride = 1 if self.source_is_file else 3
         while not self._stop.is_set():
             t0 = time.monotonic()
             ok, frame = self._cap.read()
@@ -110,12 +116,16 @@ class Camera:
                 time.sleep(0.05)  # 实时源偶发丢帧：稍等重试
                 continue
             ts = time.time()
+            frame_idx += 1
             with self._lock:
                 self._latest = (ts, frame)
-            jpg = self._encode_ring_frame(frame)
-            if jpg is not None:
-                with self._lock:
-                    self._ring.append((ts, jpg))
+            if frame_idx % encode_stride == 0 or self._latest_jpeg is None:
+                jpg = self._encode_ring_frame(frame)
+                if jpg is not None:
+                    h, w = frame.shape[:2]
+                    with self._lock:
+                        self._ring.append((ts, jpg))
+                        self._latest_jpeg = (ts, jpg, w, h)
             elapsed = time.monotonic() - t0
             if elapsed < interval:
                 time.sleep(interval - elapsed)
@@ -124,7 +134,8 @@ class Camera:
         """长边缩到 ring_width 后 JPEG 编码（环形缓冲统一存小图）。"""
         h, w = frame.shape[:2]
         scale = self.ring_width / max(h, w)
-        small = (cv2.resize(frame, (int(w * scale), int(h * scale)))
+        small = (cv2.resize(frame, (int(w * scale), int(h * scale)),
+                            interpolation=cv2.INTER_NEAREST)
                  if scale < 1.0 else frame)
         ok, buf = cv2.imencode(".jpg", small,
                                [cv2.IMWRITE_JPEG_QUALITY,
@@ -135,6 +146,11 @@ class Camera:
         """最新一帧原始图（BGR）。还没采到帧时返回 None。"""
         with self._lock:
             return self._latest
+
+    def latest_jpeg(self) -> tuple[float, bytes, int, int] | None:
+        """最新已编码的缩略图 (ts, jpeg_bytes, orig_w, orig_h)，供控制台零拷贝直取。"""
+        with self._lock:
+            return self._latest_jpeg
 
     def ring(self, seconds: float | None = None) -> list[tuple[float, bytes]]:
         """环形缓冲快照：[(ts, jpeg_bytes), ...] 从旧到新。
