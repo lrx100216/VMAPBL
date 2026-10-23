@@ -119,4 +119,10 @@ server:
   port: 8321                  # 浏览器访问 http://127.0.0.1:8321
   frame_interval_s: 3.0       # 前端缩略图轮询间隔（秒；省电，画面变化才值得更频繁）
 
+# 外部消息通知推送（钉钉/飞书机器人或通用 Webhook）
+notify:
+  dingtalk_webhook: ""       # 钉钉自定义机器人 Webhook 地址
+  feishu_webhook: ""         # 飞书自定义机器人 Webhook 地址
+  webhook_url: ""            # 通用 Webhook (HomeAssistant, ServerChan, PushPlus, Bark)
+
 roi: {}  # M4 标定工具写入：door_inside / door_outside / bed 等多边形顶点坐标

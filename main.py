@@ -153,8 +153,89 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
     return 0
 
 
+async def _vla_perceive_loop(log: EventLog) -> int:
+    """快慢分层 VLA 极低功耗感知主回路（CPU < 1%）：
+    5fps EdgeSentinel 帧差 + 声音能量监测 -> 突变/事件激活 -> VLAPolicy 多模态端到端决策与动作分发。
+    """
+    from sensors.camera import Camera
+    from sensors.sentinel import EdgeSentinel, run_sentinel
+    from core.vla_agent import decide_and_act
+
+    cam = Camera.from_settings()
+    sentinel = EdgeSentinel.from_settings()
+
+    async def on_vla_event(obs):
+        print(f"⚡ [VLA 触发] 原因: {obs.trigger_reason} (帧差比: {getattr(obs, 'diff_ratio', 0.0):.1%})")
+        report = await decide_and_act(obs, state=state, log=log)
+        print(f"🤖 [VLA 决策] 风险: {report.get('safety_risk')} | 理解: {report.get('scene_understanding')}")
+        for act_res in report.get("action_results", []):
+            print(f"   ↳ 动作执行: {act_res.get('type')} -> {act_res.get('status')}")
+
+    print("🚀 [VLA 模式] 极低功耗快慢分层架构已启动（5fps 边缘哨兵，CPU < 1%）。Ctrl+C 退出。")
+    try:
+        stats = await run_sentinel(camera=cam, on_event_callback=on_vla_event, sentinel=sentinel)
+        print(f"\n哨兵性能统计: {stats}")
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("\nVLA 模式退出。")
+    return 0
+
+
+async def _vla_serve_loop(engine: SceneEngine, log: EventLog) -> int:
+    """VLA 模式完整系统：超低功耗哨兵 + 家人端控制台（FastAPI/WebSocket）同 loop 常驻。"""
+    import uvicorn
+    from sensors.camera import Camera
+    from sensors.sentinel import EdgeSentinel, run_sentinel
+    from core.vla_agent import decide_and_act
+    from server.app import create_app
+    from server.push import PushHub
+
+    cam = Camera.from_settings()
+    sentinel = EdgeSentinel.from_settings()
+
+    hub = PushHub()
+    app = create_app(state=state, engine=engine, log=log, hub=hub)
+    srv = config.settings().get("server", {})
+    host = srv.get("host", "127.0.0.1")
+    port = int(srv.get("port", 8321))
+    uvicorn_cfg = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    server = uvicorn.Server(uvicorn_cfg)
+    server_task = asyncio.create_task(server.serve())
+    for _ in range(100):
+        if server.started:
+            break
+        await asyncio.sleep(0.05)
+
+    print(f"🌐 家人端控制台：http://{host}:{port}")
+    print("🚀 [VLA 模式] 极低功耗快慢分层架构与控制台常驻中（5fps 边缘哨兵，CPU < 1%）。Ctrl+C 退出。")
+
+    stop_ev = asyncio.Event()
+
+    async def on_vla_event(obs):
+        print(f"⚡ [VLA 触发] 原因: {obs.trigger_reason} (帧差比: {getattr(obs, 'diff_ratio', 0.0):.1%})")
+        report = await decide_and_act(obs, state=state, log=log)
+        print(f"🤖 [VLA 决策] 风险: {report.get('safety_risk')} | 理解: {report.get('scene_understanding')}")
+        for act_res in report.get("action_results", []):
+            print(f"   ↳ 动作执行: {act_res.get('type')} -> {act_res.get('status')}")
+
+    try:
+        stats = await run_sentinel(camera=cam, on_event_callback=on_vla_event, sentinel=sentinel, stop_event=stop_ev)
+        print(f"\n哨兵性能统计: {stats}")
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("\nVLA 服务退出。")
+    finally:
+        stop_ev.set()
+        server.should_exit = True
+        try:
+            await asyncio.wait_for(asyncio.shield(server_task), timeout=3.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            server_task.cancel()
+    return 0
+
+
 async def amain() -> int:
-    parser = argparse.ArgumentParser(description="本地 AI 管家（M7 完整系统入口）")
+    parser = argparse.ArgumentParser(description="本地 AI 管家（M7 完整系统入口，支持 Classic 与 VLA 双模）")
+    parser.add_argument("--mode", choices=["classic", "vla"], default="classic",
+                        help="运行架构模式：classic（传统级联流水线）或 vla（极低功耗快慢分层 VLA 架构，默认 classic）")
     parser.add_argument("--list", action="store_true", help="列出全部场景")
     parser.add_argument("--trigger", metavar="SCENE_ID", action="append",
                         help="手动触发一个场景（可重复传入，按顺序依次触发）")
@@ -162,9 +243,9 @@ async def amain() -> int:
                         help="随触发注入的文字（如模拟家人留言给 msg_to_elder）")
     parser.add_argument("--voice", action="store_true", help="进入语音回路")
     parser.add_argument("--perceive", action="store_true",
-                        help="进入感知回路（M4 感知 + 场景触发器在线，Ctrl+C 退出）")
+                        help="进入感知回路（Ctrl+C 退出）")
     parser.add_argument("--serve", action="store_true",
-                        help="M7 完整系统：感知回路 + 家人端控制台常驻（Ctrl+C 退出）")
+                        help="完整系统：感知回路 + 家人端控制台常驻（Ctrl+C 退出）")
     args = parser.parse_args()
 
     db_path = config.ROOT / config.settings().get("global", {}).get(
@@ -184,11 +265,28 @@ async def amain() -> int:
         if args.voice:
             return await _voice_loop(engine)
         if args.perceive:
+            if args.mode == "vla":
+                return await _vla_perceive_loop(log)
             return await _perceive_loop(engine)
         if args.serve:
+            if args.mode == "vla":
+                return await _vla_serve_loop(engine, log)
             return await _serve_loop(engine, log)
         if args.trigger:
             exit_code = 0
+            if args.mode == "vla":
+                from core.vla_agent import decide_and_act
+                for scene_id in args.trigger:
+                    obs = {
+                        "trigger_reason": scene_id,
+                        "speech_text": args.text,
+                        "context_state": {"occupancy": state.occupancy, "is_still": state.is_still},
+                    }
+                    report = await decide_and_act(obs, state=state, log=log)
+                    print(f"🤖 [VLA 决策] 场景: {scene_id} -> 风险: {report.get('safety_risk')} | 理解: {report.get('scene_understanding')}")
+                    for act_res in report.get("action_results", []):
+                        print(f"   ↳ 动作执行: {act_res.get('type')} -> {act_res.get('status')}")
+                return 0
             for scene_id in args.trigger:
                 ctx = {"text": args.text} if args.text else None
                 try:

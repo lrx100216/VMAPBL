@@ -9,6 +9,8 @@ REST 端点（家人端界面用）：
 - POST /api/msg_to_elder 家人→老人留言：发布 family.msg_to_elder 事件，
                          由引擎 event 触发场景1b 播报（不在这里落库，
                          落库是 family_message_receive 的职责）
+- POST /api/webhook/family_reply 外部 Webhook（钉钉/飞书机器人或通用 Webhook）
+                         家人回复回调：解析 JSON 并触发 family.msg_to_elder
 - GET  /api/frame        当前画面缩略图（JPEG base64，前端轮询）
 - GET  /api/events       最近决策日志（排查用）
 - GET  /api/costs        云端调用次数与成本（M8 成本核算的实时预览）
@@ -97,6 +99,49 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
             raise HTTPException(status_code=422, detail="留言不能为空")
         await bus.publish({"type": "family.msg_to_elder",
                            "payload": {"text": text, "sender": "家人"}})
+        return {"ok": True, "text": text}
+
+    @app.post("/api/webhook/family_reply")
+    async def api_webhook_family_reply(body: dict = Body(...)) -> dict:
+        """接收外部 Webhook（钉钉/飞书机器人或通用 Webhook）的家人回复，并转发给老人。"""
+        # 兼容飞书 URL 校验事件
+        if body.get("type") == "url_verification" and "challenge" in body:
+            return {"challenge": body["challenge"]}
+
+        text = ""
+        raw_text = body.get("text")
+        if isinstance(raw_text, str):
+            text = raw_text.strip()
+        elif isinstance(raw_text, dict):
+            text = str(raw_text.get("content") or "").strip()
+        elif "content" in body and isinstance(body["content"], str):
+            text = body["content"].strip()
+
+        # 兼容飞书事件格式 (v2 event / message.content json)
+        if not text and isinstance(body.get("event"), dict):
+            ev = body["event"]
+            msg_obj = ev.get("message") or {}
+            c = msg_obj.get("content") or ev.get("text") or ""
+            if isinstance(c, str):
+                c_str = c.strip()
+                if c_str.startswith("{") and c_str.endswith("}"):
+                    try:
+                        inner = json.loads(c_str)
+                        if isinstance(inner, dict) and "text" in inner:
+                            text = str(inner["text"]).strip()
+                    except Exception:
+                        text = c_str
+                else:
+                    text = c_str
+            elif isinstance(c, dict):
+                text = str(c.get("text") or "").strip()
+
+        if not text:
+            raise HTTPException(status_code=422, detail="留言不能为空")
+
+        sender = str(body.get("sender") or body.get("senderNick") or "家人").strip() or "家人"
+        await bus.publish({"type": "family.msg_to_elder",
+                           "payload": {"text": text, "sender": sender}})
         return {"ok": True, "text": text}
 
     @app.get("/api/frame")
