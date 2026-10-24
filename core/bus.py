@@ -25,6 +25,17 @@ def subscribe(type_pattern: str, handler: Handler) -> None:
     _subs.append((type_pattern, handler))
 
 
+def unsubscribe(handler: Handler, type_pattern: str | None = None) -> int:
+    """取消订阅。若指定 type_pattern 则仅取消该模式对应的订阅；未指定则取消该 handler 的全部订阅。返回取消的订阅数量。"""
+    global _subs
+    initial = len(_subs)
+    if type_pattern is None:
+        _subs = [(p, h) for p, h in _subs if h != handler]
+    else:
+        _subs = [(p, h) for p, h in _subs if not (p == type_pattern and h == handler)]
+    return initial - len(_subs)
+
+
 async def publish(event: Event) -> None:
     """发布事件：补齐 ts/payload，然后按订阅顺序派发给所有匹配的处理器。"""
     event.setdefault("ts", time.time())

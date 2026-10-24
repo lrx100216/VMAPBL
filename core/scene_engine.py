@@ -216,6 +216,7 @@ class SceneEngine:
         self._running: set[str] = set()
         self._time_fired: dict[str, str] = {}   # time 触发器：场景 id → 已触发日期
         self._time_task = None
+        self._bus_handlers: list[tuple[str, Any]] = []
         self._load_all(Path(scenes_dir))
 
     def _load_all(self, scenes_dir: Path) -> None:
@@ -247,6 +248,7 @@ class SceneEngine:
             await self.run_queued(matched, ctx={"text": text, "intent": intent})
 
         bus.subscribe("speech.final", _route)
+        self._bus_handlers.append(("speech.final", _route))
 
     async def _fire(self, scene_ids: list[str], source: str,
                     detail: dict, ctx: dict | None = None) -> dict[str, bool | None]:
@@ -297,6 +299,7 @@ class SceneEngine:
                              {"entity": entity, "new": new})
 
         bus.subscribe("state.*", _on_state)
+        self._bus_handlers.append(("state.*", _on_state))
 
     def wire_event_triggers(self) -> None:
         """M5 接线：按 YAML 的 event 名订阅总线（如 sensor.still）。
@@ -315,6 +318,7 @@ class SceneEngine:
                                  {"event": et, "payload": event.get("payload")},
                                  ctx={"event": event})
             bus.subscribe(etype, _on_bus)
+            self._bus_handlers.append((etype, _on_bus))
 
     def wire_time_triggers(self, tick_s: float = 30.0):
         """M5 接线：每日定时触发（`- type: time, at: "08:30:00"`）。
@@ -383,11 +387,14 @@ class SceneEngine:
         return fired
 
     def unwire(self) -> None:
-        """停掉定时循环（总线订阅随进程/测试 clear_subscriptions 一起清）。"""
+        """停掉定时循环并从总线注销所有事件与状态处理器。"""
         task = getattr(self, "_time_task", None)
         if task is not None:
             task.cancel()
             self._time_task = None
+        for pattern, handler in list(self._bus_handlers):
+            bus.unsubscribe(handler, pattern)
+        self._bus_handlers.clear()
 
     @property
     def scenes(self) -> dict[str, Scene]:

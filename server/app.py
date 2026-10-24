@@ -292,5 +292,11 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
             pass
         finally:
             hub.unregister(q)
+            if not recv_task.done():
+                recv_task.cancel()
+                try:
+                    await recv_task
+                except (asyncio.CancelledError, WebSocketDisconnect):
+                    pass
 
     return app

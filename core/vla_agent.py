@@ -106,6 +106,29 @@ def get_silence_until() -> float:
     return _silence_until
 
 
+def _distress_in_speech(speech: str, distress: list[str]) -> bool:
+    """检查 speech 里是否存在未被否定词前缀修饰的求助词。
+    
+    没有该护栏时，老人明确否认的表达（「没摔」「没摔着」「我没事没摔」）
+    会因子串包含「摔」被误判为求助而触发虚假最高紧急警报。
+    只看紧邻的前两个字符：覆盖「没/不/无/未/别」等单双字否定。
+    """
+    if not speech:
+        return False
+    for kw in distress:
+        start = 0
+        while True:
+            i = speech.find(kw, start)
+            if i < 0:
+                break
+            prefix = speech[max(0, i - 2):i]
+            if not any(neg in prefix for neg in ("没", "不", "无", "未", "别")):
+                return True
+            start = i + len(kw)
+    return False
+
+
+
 # ============================================================================
 # 2. VLA 策略网络 (VLAPolicy)
 # ============================================================================
@@ -173,9 +196,11 @@ class VLAPolicy:
         reason = (obs.trigger_reason or "").lower()
         speech = (obs.speech_text or "").strip()
 
-        # 1. 语音中包含明显求助/不适关键词 -> 紧急响应
+        # 1. 语音中包含明显求助/不适关键词且未被否定词前缀修饰 -> 紧急响应
         distress_keywords = ["救命", "摔", "疼", "起不来", "动不了", "难受", "头晕", "心慌", "不舒服", "救救我"]
-        if speech and any(k in speech for k in distress_keywords):
+        fine_keywords = ["没事", "没摔", "还好", "自己起来", "不疼"]
+        has_fine = any(k in speech for k in fine_keywords)
+        if speech and _distress_in_speech(speech, distress_keywords) and not has_fine:
             return {
                 "scene_understanding": f"老人明确呼救或表达不适：「{speech}」，视觉信号受限，触发紧急响应。",
                 "safety_risk": "emergency",
@@ -651,7 +676,57 @@ async def decide_and_act(
 
     # 2. 依次派发动作
     action_results: list[dict[str, Any]] = []
+    followup_actions: list[dict[str, Any]] = []
+
     for act in decision.get("actions", []):
+        res = await dispatch_action(act, state=target_state, log=target_log)
+        action_results.append(res)
+
+        # 闭环检查：若动作是带有语音收听的安全二次问询（例如突发静止/跌倒筛查）
+        act_dict = act.to_dict() if hasattr(act, "to_dict") else dict(act)
+        payload = act_dict.get("payload") or {}
+        is_safety_check = (
+            payload.get("is_safety_check")
+            or "还好吗" in str(payload.get("text", ""))
+            or any(k in str(obs.trigger_reason).lower() for k in ("still", "fall", "sudden_still"))
+        )
+        if (
+            act_dict.get("type") == ActionType.SPEAK.value
+            and float(payload.get("listen_reply_s", 0.0) or 0.0) > 0
+            and is_safety_check
+        ):
+            reply = str(res.get("reply") or "").strip()
+            fine_keywords = ["没事", "没摔", "还好", "自己起来", "不疼"]
+            distress_keywords = ["救命", "摔", "疼", "起不来", "动不了", "难受", "头晕", "心慌", "不舒服", "救救我"]
+
+            # 若回复包含平安词且无求助
+            if reply and any(k in reply for k in fine_keywords) and not _distress_in_speech(reply, distress_keywords):
+                safe_act = {
+                    "type": ActionType.SPEAK.value,
+                    "payload": {"text": "好的奶奶，那您慢一点，注意安全。", "listen_reply_s": 0.0},
+                }
+                followup_actions.append(safe_act)
+            else:
+                # 危险信号：无回复（老人可能昏厥）或明确求助/呻吟
+                alert_msg = f"疑似跌倒！老人语音回复：「{reply}」，请立即查看！" if reply else "疑似跌倒且语音询问无应答，请立即查看！"
+                alert_act = {
+                    "type": ActionType.NOTIFY_FAMILY.value,
+                    "payload": {
+                        "msg": alert_msg,
+                        "urgent": True,
+                        "sender": "养老AI管家",
+                        "recipient": "家人",
+                    },
+                }
+                silence_act = {
+                    "type": ActionType.STOP_ALERT.value,
+                    "payload": {"duration_s": 1800.0},
+                }
+                followup_actions.extend([alert_act, silence_act])
+
+    # 执行闭环衍生动作
+    for act in followup_actions:
+        decision.setdefault("actions", []).append(act)
         res = await dispatch_action(act, state=target_state, log=target_log)
         action_results.append(res)
 

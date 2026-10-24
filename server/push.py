@@ -59,6 +59,13 @@ class PushHub:
                 pass
         q.put_nowait(event)
 
+    def unwire(self) -> None:
+        """注销对 bus 的订阅并清空所有连接队列。"""
+        for p in self._patterns:
+            bus.unsubscribe(self._on_event, p)
+        with self._lock:
+            self._queues.clear()
+
     def _on_event(self, event: dict) -> None:
         """bus handler：可能跑在任意 loop（发布者 loop）。"""
         try:
@@ -68,7 +75,14 @@ class PushHub:
         with self._lock:
             targets = list(self._queues)
         for loop, q in targets:
+            if loop.is_closed():
+                self.unregister(q)
+                continue
             if cur is loop:
                 self._put_drop_oldest(q, event)
             else:
-                loop.call_soon_threadsafe(self._put_drop_oldest, q, event)
+                try:
+                    loop.call_soon_threadsafe(self._put_drop_oldest, q, event)
+                except RuntimeError:
+                    # 目标 loop 已关闭或正在析构，自动清理陈旧队列
+                    self.unregister(q)

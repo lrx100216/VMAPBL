@@ -637,6 +637,11 @@ async def run_sentinel(
 
     interval = 1.0 / sentinel.fps
 
+    from sensors.camera import Camera, set_current
+    is_cam_inst = isinstance(camera, Camera) or (hasattr(camera, "latest") and hasattr(camera, "ring"))
+    if is_cam_inst:
+        set_current(camera)
+
     # 若摄像头有 start 接口且未启动，自动启动
     if hasattr(camera, "start") and hasattr(camera, "started") and not camera.started:
         camera.start()
@@ -714,6 +719,8 @@ async def run_sentinel(
     except (asyncio.CancelledError, KeyboardInterrupt):
         log.info("EdgeSentinel 异步循环已优雅退出")
     finally:
+        if is_cam_inst:
+            set_current(None)
         stats = sentinel.get_benchmark_stats()
         log.info(
             "EdgeSentinel 运行报告: 检查 %d 次, 平均 %.3f ms/次 (目标 <1ms: %s), 最大 %.3f ms, 触发事件 %d 个",
@@ -723,4 +730,4 @@ async def run_sentinel(
             stats["max_ms_per_check"],
             stats["events_count"],
         )
-        return stats
+    return stats

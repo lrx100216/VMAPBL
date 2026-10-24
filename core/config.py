@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from functools import lru_cache
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent  # 项目根目录（VMAPBL/）
 _SETTINGS_PATH = ROOT / "config" / "settings.yaml"
+_yaml_lock = threading.Lock()
 load_dotenv(ROOT / ".env")
 
 
@@ -40,18 +42,19 @@ def save_roi(name: str, points: list[list[int] | tuple[int, int]],
     target = settings_path or _SETTINGS_PATH
     ryaml = YAML()
     ryaml.preserve_quotes = True
-    if target.exists():
-        with open(target, encoding="utf-8") as f:
-            data = ryaml.load(f) or {}
-    else:
-        data = {}
-    if data.get("roi") is None:
-        data["roi"] = {}
     clean_pts = [[int(round(x)), int(round(y))] for x, y in points]
-    data["roi"][name] = clean_pts
-    with open(target, "w", encoding="utf-8") as f:
-        ryaml.dump(data, f)
-    reload_settings()
+    with _yaml_lock:
+        if target.exists():
+            with open(target, encoding="utf-8") as f:
+                data = ryaml.load(f) or {}
+        else:
+            data = {}
+        if data.get("roi") is None:
+            data["roi"] = {}
+        data["roi"][name] = clean_pts
+        with open(target, "w", encoding="utf-8") as f:
+            ryaml.dump(data, f)
+        reload_settings()
     return clean_pts
 
 
@@ -60,19 +63,20 @@ def delete_roi(name: str, settings_path: Path | None = None) -> bool:
     from ruamel.yaml import YAML
 
     target = settings_path or _SETTINGS_PATH
-    if not target.exists():
-        return False
     ryaml = YAML()
     ryaml.preserve_quotes = True
-    with open(target, encoding="utf-8") as f:
-        data = ryaml.load(f) or {}
-    rois = data.get("roi")
-    if not isinstance(rois, dict) or name not in rois:
-        return False
-    del rois[name]
-    with open(target, "w", encoding="utf-8") as f:
-        ryaml.dump(data, f)
-    reload_settings()
+    with _yaml_lock:
+        if not target.exists():
+            return False
+        with open(target, encoding="utf-8") as f:
+            data = ryaml.load(f) or {}
+        rois = data.get("roi")
+        if not isinstance(rois, dict) or name not in rois:
+            return False
+        del rois[name]
+        with open(target, "w", encoding="utf-8") as f:
+            ryaml.dump(data, f)
+        reload_settings()
     return True
 
 

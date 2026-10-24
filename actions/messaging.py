@@ -29,8 +29,8 @@ async def family_message_send(ctx: dict) -> dict:
     text = (ctx.get("text") or "").strip()
     if not text:
         return {"status": "empty"}
-    data = await chat_json(_EXTRACT_PROMPT.format(text=text),
-                           scene_id="msg_to_family")
+    prompt = _EXTRACT_PROMPT.replace("{text}", text)
+    data = await chat_json(prompt, scene_id="msg_to_family")
     if data.get("uncertain"):
         return {"status": "uncertain"}
     recipient = str(data.get("recipient") or "").strip()

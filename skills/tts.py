@@ -31,7 +31,7 @@ async def _spawn_say(text: str) -> None:
     rate = int(cfg.get("rate", 0) or 0)
     if rate:
         cmd += ["-r", str(rate)]
-    cmd.append(text)
+    cmd.extend(["--", text])
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
     await proc.wait()

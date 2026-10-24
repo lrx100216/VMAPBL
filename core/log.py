@@ -45,8 +45,10 @@ CREATE TABLE IF NOT EXISTS messages (
     status TEXT NOT NULL DEFAULT 'unread'   -- unread / read / replied
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS idx_events_scene ON events(scene_id);
 CREATE INDEX IF NOT EXISTS idx_api_ts ON api_calls(ts);
 CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
+CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
 """
 
 
@@ -152,6 +154,17 @@ class EventLog:
             self._conn.execute("UPDATE messages SET status = ? WHERE id = ?",
                                (status, msg_id))
             self._conn.commit()
+
+    def prune_events(self, keep_days: int = 30) -> int:
+        """清理超过 keep_days 天的历史事件，防止长时间运行导致 SQLite 文件膨胀。返回删除条数。"""
+        if keep_days <= 0:
+            return 0
+        cutoff = time.time() - (keep_days * 86400.0)
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM events WHERE ts < ?", (cutoff,))
+            deleted = cur.rowcount
+            self._conn.commit()
+            return int(deleted)
 
     def close(self) -> None:
         with self._lock:

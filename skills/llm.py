@@ -35,6 +35,7 @@ async def chat_json(prompt: str, scene_id: str = "",
             if data is not None:
                 data.setdefault("uncertain", False)
                 return data
+            messages.append({"role": "assistant", "content": content or "{}"})
             messages.append({"role": "user", "content":
                              "你上一次的输出不是合法 JSON。这次只输出 JSON 对象本身。"})
         except Exception as e:

@@ -50,5 +50,15 @@ class StateStore:
                         "old": old, "new": dict(self.medication_taken)},
         })
 
+    def reset_daily_medication(self) -> None:
+        """每日凌晨重置用药打卡状态。"""
+        old = dict(self.medication_taken)
+        self.medication_taken = {"morning": False, "noon": False, "evening": False}
+        bus.publish_nowait({
+            "type": "state.medication_taken", "ts": time.time(),
+            "payload": {"entity": "medication_taken", "slot": "all",
+                        "old": old, "new": dict(self.medication_taken)},
+        })
+
 
 state = StateStore()  # 单例：全项目共享这一份
