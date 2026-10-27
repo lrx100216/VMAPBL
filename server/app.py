@@ -10,7 +10,9 @@ REST 端点（家人端界面用）：
                          由引擎 event 触发场景1b 播报（不在这里落库，
                          落库是 family_message_receive 的职责）
 - POST /api/webhook/family_reply 外部 Webhook（钉钉/飞书机器人或通用 Webhook）
-                         家人回复回调：解析 JSON 并触发 family.msg_to_elder
+                         家人回复回调：解析 JSON 后经 family_router 分流——
+                         状态询问触发 family.status_query（场景2），
+                         其余作为留言触发 family.msg_to_elder（场景1b）
 - GET  /api/frame        当前画面缩略图（JPEG base64，前端轮询）
 - GET  /api/events       最近决策日志（排查用）
 - GET  /api/costs        云端调用次数与成本（M8 成本核算的实时预览）
@@ -140,8 +142,8 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
             raise HTTPException(status_code=422, detail="留言不能为空")
 
         sender = str(body.get("sender") or body.get("senderNick") or "家人").strip() or "家人"
-        await bus.publish({"type": "family.msg_to_elder",
-                           "payload": {"text": text, "sender": sender}})
+        from skills.family_router import route_family_message
+        await route_family_message(text, sender=sender)
         return {"ok": True, "text": text}
 
     @app.get("/api/frame")

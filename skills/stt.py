@@ -27,6 +27,8 @@ from sensors.vad import VadStream
 
 _MODEL: WhisperModel | None = None
 _listen_lock = asyncio.Lock()
+# 前景（安全确认）抢占背景常驻监听：背景每次取块前检查，前景等待锁前置位。
+_BACKGROUND_ABORT = asyncio.Event()
 
 
 def _stt_settings() -> dict:
@@ -73,10 +75,12 @@ def _transcribe_sync(seg_16k: np.ndarray) -> str:
     return "".join(seg.text for seg in segments).strip()
 
 
-async def record_utterance(timeout_s: float) -> np.ndarray | None:
+async def record_utterance(timeout_s: float,
+                           abort: asyncio.Event | None = None) -> np.ndarray | None:
     """录一句话：等 VAD 检测到语句开始→结束，返回 16kHz float32 音频段。
 
     timeout_s 内没等到语音 → None；说话超过 vad.max_utterance_s 强制截断返回。
+    abort 被置位时立即返回 None（背景监听给前景安全确认让路）。
     """
     cfg = config.settings().get("vad", {})
     max_utt_s = float(cfg.get("max_utterance_s", 15.0))
@@ -88,6 +92,8 @@ async def record_utterance(timeout_s: float) -> np.ndarray | None:
     vad = VadStream()
     async with Microphone() as mic:
         async for block in mic.blocks_16k():
+            if abort is not None and abort.is_set():
+                return None
             collected.append(block)
             total += block.size
             for kind, pos in vad.feed(block):
@@ -103,17 +109,39 @@ async def record_utterance(timeout_s: float) -> np.ndarray | None:
     return None
 
 
-async def listen(timeout_s: float | None = None) -> str:
-    """听一句话并返回识别文本；没听到/识别不出返回 ""。绝不抛异常。"""
+async def listen(timeout_s: float | None = None, *,
+                 background: bool = False,
+                 raise_errors: bool = False) -> str:
+    """听一句话并返回识别文本；没听到/识别不出返回 ""。绝不抛异常。
+
+    background=True 用于常驻语音回路：前景监听（跌倒/起床等安全确认）
+    会置位抢占信号，背景录音在约一个音频块内放弃并让出麦克风。
+    raise_errors=True 仅供需要退避/降级的常驻调用方使用；默认静默语义不变。
+    """
     if timeout_s is None:
         timeout_s = float(_stt_settings().get("timeout_s", 8.0))
+    if not background:
+        _BACKGROUND_ABORT.set()   # 先让正在进行的背景录音让路，再排队拿锁
+    acquired = False
     try:
         async with _listen_lock:
-            seg = await record_utterance(timeout_s)
+            acquired = True
+            if not background:
+                _BACKGROUND_ABORT.clear()
+            if background:
+                seg = await record_utterance(timeout_s, abort=_BACKGROUND_ABORT)
+            else:
+                seg = await record_utterance(timeout_s)
         if seg is None or seg.size < 1600:  # 短于 0.1s 不送识别
             return ""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _transcribe_sync, seg)
     except Exception as e:
         print(f"[stt] 收声失败（{type(e).__name__}: {e}）")
+        if raise_errors:
+            raise
         return ""
+    finally:
+        # 前景确认在拿到锁之前被取消时，必须撤销抢占，否则背景监听永久空转
+        if not background and not acquired:
+            _BACKGROUND_ABORT.clear()

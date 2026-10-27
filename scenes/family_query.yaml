@@ -5,6 +5,8 @@ id: family_query
 name: 场景2 · 家人远程询问老人状态
 trigger:
   - type: manual
+  - type: event
+    event: family.status_query   # 钉钉/飞书家人问「我妈在干嘛」→ family_router 分流
 condition:
   - type: cooldown
     seconds: 30

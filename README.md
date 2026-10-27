@@ -44,6 +44,8 @@ VMAPBL/
 │   ├── stt.py                  # listen：VAD 切句 + faster-whisper small/int8/zh，模型常驻内存
 │   ├── tts.py                  # speak：唯一发声出口，say -v Tingting + 互斥锁 + 400ms 尾静默
 │   ├── notify.py               # send：家人端消息（落 messages 表 + 总线广播，urgent 分级）
+│   ├── voice_loop.py           # 第二阶段：常驻语音回路（背景监听，安全确认可抢占）
+│   ├── family_router.py        # 第二阶段：家人消息分流（状态询问 / 留言）
 │   └── ocr.py                  # Apple Vision OCR（L2.5 档，场景8 优先走这里）
 ├── actions/                    # 场景动作实现（YAML 里 type: skill 的 name 对应这里的函数）
 │   ├── door.py                 # 场景3：ROI 落点判定 + VLM 兜底
@@ -259,7 +261,7 @@ sqlite3 data/butler.db "SELECT id, direction, text, urgent FROM messages ORDER B
 soak_test 循环跑感知管线直到时间预算耗尽，全程零异常、RSS 漂移 <20MB
 即为稳压通过（先短时冒烟，再上 120 分钟正式稳压）；cost_report 从
 butler.db 汇总云端调用次数/token/成本与各场景决策事件统计，`--since`
-可按起始日期过滤。pytest 全量 166 项通过。
+可按起始日期过滤。
 
 ```bash
 python tools/cost_report.py
@@ -268,4 +270,26 @@ python tools/soak_test.py --video tests/media/smoke_none_01.mp4 --minutes 5
 python tools/replay.py fall --expect fall tests/media/fall_*.mp4
 ./.venv/bin/python -m pytest -q
 ```
+
+**第二阶段：常驻语音与家人消息路由验证**。
+
+`--serve` 现在同时启动感知与常驻语音回路：老人直接说「给儿子发消息说我晚上过去吃饭」
+走场景1，说「帮我念一下上面写的什么」走场景8。跌倒/起床/吃药的安全语音确认
+会抢占背景监听（约一个音频块内让出麦克风），不会出现两条链路抢录音或确认被拖到超时。
+
+钉钉/飞书回调仍走 `POST /api/webhook/family_reply`，现在按内容分流：
+
+- 「我妈在干嘛」「查状态」「老人状态怎么样」→ 场景2（抓帧 + VLM → 推回家人端/机器人）；
+- 其余文字 → 家人留言播报 + 老人语音回复（场景1b）；
+- 以「留言：」开头强制当留言，避免关键词误判；超过 24 字的文本一律当留言。
+
+```bash
+python main.py --serve
+curl -s -X POST http://127.0.0.1:8321/api/webhook/family_reply -H 'Content-Type: application/json' -d '{"text":"我妈在干嘛","sender":"儿子"}'
+curl -s -X POST http://127.0.0.1:8321/api/webhook/family_reply -H 'Content-Type: application/json' -d '{"text":"妈，吃饭了吗","sender":"女儿"}'
+./.venv/bin/python -m pytest -q
+```
+
+语音开关与超时在 `config/settings.yaml` 的 `voice:` 分区；路由关键词与长度上限在
+`family_router:` 分区。麦克风不可用时语音回路有限重试后自动退出，感知与告警继续运行。
 

@@ -128,4 +128,16 @@ notify:
   max_attempts: 3            # 网络错误、429、5xx 的单渠道最大尝试次数
   retry_backoff_s: 0.5       # 指数退避基数；测试注入 0
 
+# 常驻语音回路（--serve 下与感知并行；安全确认走前景优先级抢占）
+voice:
+  enabled_in_serve: true     # --serve 是否启动常驻语音回路
+  background_timeout_s: 6.0  # 背景监听单次等待时长（秒）
+  failure_retry_s: 2.0       # 收声失败后的重试间隔
+  max_consecutive_failures: 3  # 连续失败多少次后停止语音回路（感知/告警继续）
+
+# 家人消息路由（钉钉/飞书/控制台共用）
+family_router:
+  status_keywords: [在干嘛, 在做什么, 状态怎么样, 查状态, 老人状态, 家里怎么样, 还好吗, 起床了吗, 睡了吗]
+  max_status_chars: 24       # 超过此长度的文本一律当留言，避免误判
+
 roi: {}  # M4 标定工具写入：door_inside / door_outside / bed 等多边形顶点坐标

@@ -6,7 +6,7 @@ M7 阶段调试 CLI：
     python main.py --trigger demo_hello --trigger demo_hello   # 手动触发（可重复）
     python main.py --voice                    # 语音回路：说话 → 意图 → 场景 → 播报
     python main.py --perceive                 # 感知回路 + 场景 3/4/5/6/7 触发器在线
-    python main.py --serve                    # M7 完整系统：感知回路 + 家人端控制台常驻
+    python main.py --serve                    # 完整系统：感知 + 常驻语音 + 家人端控制台常驻
     python main.py --trigger msg_to_elder --text "吃饭了吗"    # 模拟家人端留言（场景1b）
     python main.py --trigger family_query     # 模拟家人远程问状态（场景2，需摄像头）
     python main.py --trigger door_key         # 手动触发场景3（ROI 判定需先标定）
@@ -27,7 +27,7 @@ import asyncio
 import sys
 
 from actions import SKILLS
-from core import bus, config
+from core import config
 from core.log import EventLog, set_default
 from core.scene_engine import SceneEngine, SceneError
 from core.state import state
@@ -37,9 +37,10 @@ async def _voice_loop(engine: SceneEngine) -> int:
     """M3 语音回路：listen → classify → speech.final 事件 → 引擎路由 → 播报。
 
     验证点（M3 验收）：对话式交互可用；播报不会被自己录进去（半双工）。
+    第二阶段起与 `--serve` 的常驻回路共用 skills/voice_loop.py。
     """
-    from skills import stt, tts
-    from skills.intent import classify
+    from skills import stt
+    from skills.voice_loop import run_voice_loop
 
     engine.wire_speech_triggers()
     await asyncio.get_running_loop().run_in_executor(None, stt.warmup)
@@ -47,22 +48,10 @@ async def _voice_loop(engine: SceneEngine) -> int:
     print("  可以试试：「给儿子发消息说我晚上过去吃饭」（场景1）")
     print("       或：「帮我念一下这张纸上写的什么」（场景8）")
     try:
-        while True:
-            print("……等待说话")
-            text = await stt.listen()
-            if not text:
-                print("（没听到声音，继续等）")
-                continue
-            print(f"识别：{text}")
-            intent = await classify(text)
-            print(f"意图：{intent}")
-            await bus.publish({"type": "speech.final",
-                               "payload": {"text": text, "intent": intent}})
-            if intent == "chat":
-                await tts.speak("奶奶，我在。给家人发消息，或者让我念纸上的字，都可以。")
+        await run_voice_loop()
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n语音模式退出。")
-        return 0
+    return 0
 
 
 async def _perceive_loop(engine: SceneEngine) -> int:
@@ -100,12 +89,12 @@ async def _perceive_loop(engine: SceneEngine) -> int:
 
 
 async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
-    """M7 完整系统：感知回路 + 家人端控制台（FastAPI/WebSocket）同 loop 常驻。
+    """M7 完整系统：感知回路 + 常驻语音回路 + 家人端控制台同 loop 常驻。
 
-    装配：全部触发器接线（state/event/time/speech）→ 家人端服务作为
-    asyncio 任务 → 感知回路跑主循环直到 Ctrl+C。浏览器开
-    http://127.0.0.1:8321 即家人端控制台（状态面板/画面缩略图/对话气泡/
-    手动触发场景按钮）。
+    装配：全部触发器接线（state/event/time/speech）→ 常驻语音任务
+    （skills/voice_loop.py，安全确认走前景抢占）→ 家人端服务 → 感知主循环。
+    浏览器开 http://127.0.0.1:8321 即家人端控制台（状态面板/画面缩略图/
+    对话气泡/手动触发场景按钮）。语音不可用时自动降级，感知与告警照常。
     """
     import uvicorn
 
@@ -124,6 +113,17 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
     print("⏳ 正在预热姿态模型（消除运行期首帧卡顿）……", flush=True)
     await asyncio.get_running_loop().run_in_executor(None, pose_est.warmup)
 
+    # 第二阶段：常驻语音回路与感知并行；安全确认走前景抢占（stt.listen 默认）
+    voice_stop = asyncio.Event()
+    voice_task = None
+    voice_cfg = _cfg.settings().get("voice") or {}
+    if voice_cfg.get("enabled_in_serve", True):
+        from skills import stt
+        from skills.voice_loop import start_voice_loop
+        print("⏳ 正在预热语音模型……", flush=True)
+        await asyncio.get_running_loop().run_in_executor(None, stt.warmup)
+        voice_task = start_voice_loop(stop_event=voice_stop)
+
     hub = PushHub()
     app = create_app(state=state, engine=engine, log=log, hub=hub)
     srv = _cfg.settings().get("server", {})
@@ -138,12 +138,21 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
         await asyncio.sleep(0.05)
 
     print(f"🌐 家人端控制台：http://{host}:{port}")
+    print(f"🎙 常驻语音回路：{'已启动' if voice_task else '未启用'}"
+          "（老人可直接说话；安全确认优先抢占麦克风）")
     print("   感知回路与场景触发器已在线，Ctrl+C 退出")
     try:
         await run_perception(pose=pose_est)
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n服务退出。")
     finally:
+        voice_stop.set()
+        if voice_task is not None:
+            voice_task.cancel()
+            try:
+                await voice_task
+            except (asyncio.CancelledError, Exception):
+                pass
         server.should_exit = True  # 优雅停服（比 cancel 干净，无 lifespan 噪音）
         try:
             await asyncio.wait_for(asyncio.shield(server_task), timeout=3.0)
@@ -245,7 +254,7 @@ async def amain() -> int:
     parser.add_argument("--perceive", action="store_true",
                         help="进入感知回路（Ctrl+C 退出）")
     parser.add_argument("--serve", action="store_true",
-                        help="完整系统：感知回路 + 家人端控制台常驻（Ctrl+C 退出）")
+                        help="完整系统：感知回路 + 常驻语音回路 + 家人端控制台常驻（Ctrl+C 退出）")
     args = parser.parse_args()
 
     db_path = config.ROOT / config.settings().get("global", {}).get(

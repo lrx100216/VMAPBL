@@ -6,5 +6,7 @@
 - ocr.recognize_text  L2.5 档：Apple Vision OCR
 - llm.chat_json  纯文本 JSON 调用（意图分类/信息抽取共用）
 - intent.classify  语音指令意图分类
+- voice_loop.run_voice_loop  常驻语音回路（背景监听，安全确认可抢占）
+- family_router.route_family_message  家人消息分流（状态询问 / 留言）
 - notify.send   唯一对外通知出口（M3 落 SQLite，M7 接 WebSocket）
 """
