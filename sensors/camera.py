@@ -26,6 +26,9 @@ log = logging.getLogger(__name__)
 class Camera:
     """视频源采集器。start() 后由守护线程持续抓帧，消费方用 latest()/ring() 拉取。"""
 
+    _STREAM_PREFIXES = ("rtsp://", "rtmp://", "http://", "https://",
+                        "udp://", "tcp://")
+
     def __init__(self, source: "int | str | None" = None, *, width: int = 1280,
                  height: int = 720, fps: float = 30.0, ring_seconds: float = 60.0,
                  ring_width: int = 640, ring_jpeg_quality: int = 60) -> None:
@@ -42,7 +45,9 @@ class Camera:
         self._cap: cv2.VideoCapture | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
-        self.eof = False  # 文件回放读到结尾置 True（实时摄像头永远 False）
+        self.eof = False  # 文件回放读到结尾置 True（实时源/网络流永远 False）
+        self.reconnects = 0          # 网络流断线重连次数（健康快照用）
+        self.last_error: str | None = None
 
     @classmethod
     def from_settings(cls, source: "int | str | None" = None) -> "Camera":
@@ -55,29 +60,54 @@ class Camera:
                    ring_jpeg_quality=cfg.get("ring_jpeg_quality", 60))
 
     @property
+    def source_is_stream(self) -> bool:
+        """网络流（RTSP/RTMP/HTTP）：走默认 FFmpeg 后端，断线自动重连。"""
+        return (isinstance(self.source, str)
+                and self.source.lower().startswith(self._STREAM_PREFIXES))
+
+    @property
     def source_is_file(self) -> bool:
-        return isinstance(self.source, str)
+        return isinstance(self.source, str) and not self.source_is_stream
 
     @property
     def started(self) -> bool:
         return self._thread is not None
 
-    def start(self) -> None:
-        """打开视频源并启动采集线程。打不开时抛出带排障指引的 RuntimeError。"""
-        if self.started:
-            return
+    def _open_stream_capture(self) -> cv2.VideoCapture:
+        """打开网络流：不指定 AVFoundation 后端，并尽量只缓冲最新一帧。"""
+        cap = cv2.VideoCapture(self.source)
+        if not cap.isOpened():
+            raise RuntimeError(
+                f"网络视频源打不开：{self.source!r}。请检查地址、账号密码与网络。")
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 低延迟：不要积压旧帧
+        except Exception:
+            pass
+        return cap
+
+    def _open_capture(self) -> cv2.VideoCapture:
+        """按源类型选择后端：网络流用 FFmpeg，摄像头/文件用 AVFoundation。"""
+        if self.source_is_stream:
+            return self._open_stream_capture()
         cap = cv2.VideoCapture(self.source, cv2.CAP_AVFOUNDATION)
         if not cap.isOpened() and self.source_is_file:
             # AVFoundation 对某些编码的文件打不开时退回默认后端（实时源不允许回退，
             # 规范固定摄像头必须走 CAP_AVFOUNDATION）
             log.warning("AVFoundation 打不开 %s，尝试默认后端", self.source)
             cap = cv2.VideoCapture(self.source)
+        return cap
+
+    def start(self) -> None:
+        """打开视频源并启动采集线程。打不开时抛出带排障指引的 RuntimeError。"""
+        if self.started:
+            return
+        cap = self._open_capture()
         if not cap.isOpened():
             raise RuntimeError(
                 f"视频源打不开：{self.source!r}。"
                 "摄像头请在 Terminal.app/iTerm 本地窗口首次运行以完成 TCC 授权；"
                 "文件源请检查路径与编码。")
-        if not self.source_is_file:
+        if not self.source_is_file and not self.source_is_stream:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self._cap = cap
@@ -106,6 +136,9 @@ class Camera:
         # 文件回放源每帧都编码，保证短素材离线回放帧数精确。
         encode_stride = 1 if self.source_is_file else 3
         while not self._stop.is_set():
+            if self._cap is None:      # 上次重连失败：后台继续尝试
+                self._reconnect()
+                continue
             t0 = time.monotonic()
             ok, frame = self._cap.read()
             if not ok:
@@ -113,6 +146,9 @@ class Camera:
                     self.eof = True
                     log.info("文件回放结束")
                     return
+                if self.source_is_stream:
+                    self._reconnect()
+                    continue
                 time.sleep(0.05)  # 实时源偶发丢帧：稍等重试
                 continue
             ts = time.time()
@@ -146,6 +182,49 @@ class Camera:
         """最新一帧原始图（BGR）。还没采到帧时返回 None。"""
         with self._lock:
             return self._latest
+
+    def _reconnect(self) -> None:
+        """网络流断线重连：释放旧句柄 → 可中断等待 → 重新打开。
+
+        `_cap` 只有重连成功才恢复；失败时保持 None，采集线程下一轮继续重试，
+        不会因为一次网络抖动让整个守护进程退出。
+        """
+        self.reconnects += 1
+        log.warning("网络视频源读帧失败，第 %d 次重连", self.reconnects)
+        old, self._cap = self._cap, None
+        if old is not None:
+            try:
+                old.release()
+            except Exception:
+                pass
+        delay = float(config.settings().get("camera", {}).get("reconnect_s", 2.0))
+        if self._stop.wait(max(0.0, delay)):
+            return
+        try:
+            self._cap = self._open_stream_capture()
+            self.last_error = None
+        except Exception as e:
+            # 只记录异常类型，避免把带账号密码的 RTSP 地址写进日志
+            self.last_error = type(e).__name__
+            log.warning("网络视频源重连失败（%s），稍后继续重试",
+                        type(e).__name__)
+
+    def health(self, now: float | None = None,
+               stale_s: float | None = None) -> dict:
+        """采集健康快照：给 /readyz、心跳文件和独立看门狗共用。"""
+        ts = time.time() if now is None else float(now)
+        if stale_s is None:
+            stale_s = float(config.settings().get("camera", {}).get("stale_s", 10.0))
+        latest = self.latest()
+        age = None if latest is None else max(0.0, ts - latest[0])
+        return {
+            "started": self.started,
+            "stream": self.source_is_stream,
+            "frame_age_s": None if age is None else round(age, 2),
+            "reconnects": self.reconnects,
+            "last_error": self.last_error,
+            "healthy": bool(self.started and age is not None and age <= stale_s),
+        }
 
     def latest_jpeg(self) -> tuple[float, bytes, int, int] | None:
         """最新已编码的缩略图 (ts, jpeg_bytes, orig_w, orig_h)，供控制台零拷贝直取。"""

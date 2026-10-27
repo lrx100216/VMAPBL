@@ -12,6 +12,7 @@ VMAPBL/
 ├── .env.example                # 环境变量模板（密钥/模型名/视频源），复制为 .env 后填写
 ├── config/
 │   └── settings.yaml           # 全部阈值/冷却时间/ROI 多边形（唯一事实源，标定工具写入）
+├── deploy/                     # 第三阶段：launchd 自启/防休眠与看门狗配置模板
 ├── scenes/                     # 场景定义（YAML，trigger/condition/action 三段式）
 │   ├── door_key.yaml           # 场景3 出门/回家提醒钥匙
 │   ├── medication.yaml         # 场景4 智能吃药提醒
@@ -27,7 +28,10 @@ VMAPBL/
 │   ├── state.py                # StateStore：occupancy/静止/吃药/冷却/半双工标志
 │   ├── scene_engine.py         # YAML 解释器 + 优先级仲裁（跌倒>未起床>起身>其他）
 │   ├── config.py               # 读 .env + settings.yaml 的唯一入口（模型名只在这里和 .env 出现）
-│   └── log.py                  # SQLite 决策日志：每次触发/云端调用/花费落库
+│   ├── log.py                  # SQLite 决策日志：每次触发/云端调用/花费落库
+│   ├── health.py               # 第三阶段：就绪快照（/readyz 与心跳共用）
+│   ├── heartbeat.py            # 第三阶段：原子写/读心跳文件
+│   └── logging_setup.py        # 第三阶段：日志文件 + 轮转
 ├── sensors/
 │   ├── camera.py               # 摄像头/视频文件采集：30fps + 60 秒环形缓冲（回放同一代码路径）
 │   ├── motion.py               # MOG2 运动闸门（滞回 0.15/0.05）+ 静止检测
@@ -69,7 +73,9 @@ VMAPBL/
 │   ├── soak_test.py            # M8：循环感知稳压测试（RSS/异常监控）
 │   ├── export_pose_coreml.py   # 一次性工具：导出 yolo26n-pose 为 CoreML
 │   ├── collect_pillbox_frames.py  # M6：药盒训练素材采集（按间隔抓帧存盘待标注）
-│   └── train_pillbox.py        # M6：yolo26n 药盒检测器训练（device=mps）→ models/pillbox.pt
+│   ├── train_pillbox.py        # M6：yolo26n 药盒检测器训练（device=mps）→ models/pillbox.pt
+│   ├── install_launchd.py      # 第三阶段：生成 launchd 自启/防休眠配置
+│   └── healthcheck.py          # 第三阶段：独立看门狗（只读心跳，独立告警通道）
 ├── tests/
 │   ├── media/                  # 测试素材（文件名带真实标签；gitignore 不入库）
 │   ├── conftest.py             # 全局拦截 tts：测试期间绝不真开腔（say 换成记录器）
@@ -292,4 +298,35 @@ curl -s -X POST http://127.0.0.1:8321/api/webhook/family_reply -H 'Content-Type:
 
 语音开关与超时在 `config/settings.yaml` 的 `voice:` 分区；路由关键词与长度上限在
 `family_router:` 分区。麦克风不可用时语音回路有限重试后自动退出，感知与告警继续运行。
+
+**第三阶段：真机部署与常驻运维验证**。
+
+网络摄像头：`VIDEO_SOURCE` 支持 `rtsp://`、`rtmp://`、`http(s)://`，走 FFmpeg 后端，
+断线按 `camera.reconnect_s` 自动重连；健康快照看 `camera.stale_s` 内是否有新帧。
+日志、心跳、看门狗参数在 `settings.yaml` 的 `camera:` 与 `ops:` 分区。
+
+```bash
+VIDEO_SOURCE=rtsp://user:pass@192.168.1.10/stream python main.py --serve
+curl -s http://127.0.0.1:8321/healthz
+curl -s http://127.0.0.1:8321/readyz
+cat data/heartbeat.json
+tail -f logs/butler.log
+```
+
+`/readyz` 只在视频帧新鲜且 SQLite 可写时返回 200，否则 503 并列出逐项原因。
+主进程每 10 秒原子写 `data/heartbeat.json`；独立看门狗每 60 秒读一次，
+心跳超过 180 秒未更新或 `ready=false` 时，用 `WATCHDOG_WEBHOOK_URL`
+（或 `ops.watchdog_webhook_url`）发送告警，重复告警默认 30 分钟内不刷屏。
+
+安装开机自启（LaunchAgent，含 `caffeinate -dimsu` 防休眠）：
+
+```bash
+python tools/install_launchd.py --dry-run
+python tools/install_launchd.py
+```
+
+按脚本输出的两条 `launchctl bootstrap` 命令加载。**不要改成 LaunchDaemon**：
+麦克风/AVFoundation 在系统会话中不可用，进程会在导入阶段失败。日志落盘为
+`logs/butler.log`（10MB × 5 轮转），stdout/stderr 另由 launchd 写入
+`logs/butler.out.log` 与 `logs/butler.err.log`。
 

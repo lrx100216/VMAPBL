@@ -155,6 +155,15 @@ class EventLog:
                                (status, msg_id))
             self._conn.commit()
 
+    def ping(self) -> bool:
+        """轻量可写性探针（/readyz 与心跳用）；不抛异常。"""
+        try:
+            with self._lock:
+                self._conn.execute("SELECT 1").fetchone()
+            return True
+        except Exception:
+            return False
+
     def prune_events(self, keep_days: int = 30) -> int:
         """清理超过 keep_days 天的历史事件，防止长时间运行导致 SQLite 文件膨胀。返回删除条数。"""
         if keep_days <= 0:

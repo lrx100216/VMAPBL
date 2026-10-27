@@ -34,7 +34,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from core import bus
 from core.scene_engine import SceneEngine
@@ -67,6 +67,21 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
     @app.get("/")
     async def index() -> FileResponse:
         return FileResponse(_INDEX)
+
+    @app.get("/healthz")
+    async def healthz() -> dict:
+        """存活探针：进程能响应即 200（不代表守护能力正常）。"""
+        return {"ok": True}
+
+    @app.get("/readyz")
+    async def readyz() -> JSONResponse:
+        """就绪探针：视频帧新鲜且数据库可写才 200；否则 503 并给出逐项原因。"""
+        from core.health import readiness
+        from sensors.camera import get_current
+        from skills.notify import get_webhook_urls
+        ready, snap = readiness(camera=get_current(), log=log)
+        snap["notify_channels"] = sum(1 for u in get_webhook_urls().values() if u)
+        return JSONResponse(snap, status_code=200 if ready else 503)
 
     @app.get("/api/state")
     async def api_state() -> dict:

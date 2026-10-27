@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- LaunchAgent（用户 GUI 会话），不要改成 LaunchDaemon：
+     麦克风/AVFoundation 在系统会话中不可用，进程会在导入阶段直接失败。 -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.local.butler.guardian</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-dimsu</string>
+        <string>__PYTHON__</string>
+        <string>__PROJECT_DIR__/main.py</string>
+        <string>--serve</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>15</integer>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/butler.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/butler.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>__PROJECT_DIR__</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

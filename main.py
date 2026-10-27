@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 
 from actions import SKILLS
@@ -88,6 +89,31 @@ async def _perceive_loop(engine: SceneEngine) -> int:
     return 0
 
 
+async def _heartbeat_loop(log: EventLog, voice_task=None) -> None:
+    """周期写心跳文件：独立看门狗只读它判断主进程是否还在看护。"""
+    from core.health import readiness
+    from core.heartbeat import write_heartbeat
+    from sensors.camera import get_current
+
+    ops = config.settings().get("ops") or {}
+    path = config.ROOT / str(ops.get("heartbeat_path", "data/heartbeat.json"))
+    interval = max(1.0, float(ops.get("heartbeat_s", 10.0)))
+    while True:
+        try:
+            ready, snap = readiness(camera=get_current(), log=log)
+            snap.update({
+                "pid": os.getpid(),
+                "voice_alive": bool(voice_task is not None
+                                    and not voice_task.done()),
+            })
+            write_heartbeat(path, snap)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[heartbeat] 写入失败（{type(e).__name__}）")
+        await asyncio.sleep(interval)
+
+
 async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
     """M7 完整系统：感知回路 + 常驻语音回路 + 家人端控制台同 loop 常驻。
 
@@ -137,6 +163,10 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
             break
         await asyncio.sleep(0.05)
 
+    # 服务确实起来后再启动心跳，避免端口占用等启动失败留下孤儿任务
+    heartbeat_task = asyncio.create_task(
+        _heartbeat_loop(log, voice_task), name="heartbeat")
+
     print(f"🌐 家人端控制台：http://{host}:{port}")
     print(f"🎙 常驻语音回路：{'已启动' if voice_task else '未启用'}"
           "（老人可直接说话；安全确认优先抢占麦克风）")
@@ -153,6 +183,11 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
                 await voice_task
             except (asyncio.CancelledError, Exception):
                 pass
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except (asyncio.CancelledError, Exception):
+            pass
         server.should_exit = True  # 优雅停服（比 cancel 干净，无 lifespan 噪音）
         try:
             await asyncio.wait_for(asyncio.shield(server_task), timeout=3.0)
@@ -242,6 +277,9 @@ async def _vla_serve_loop(engine: SceneEngine, log: EventLog) -> int:
 
 
 async def amain() -> int:
+    from core.logging_setup import configure_logging
+    configure_logging()
+
     parser = argparse.ArgumentParser(description="本地 AI 管家（M7 完整系统入口，支持 Classic 与 VLA 双模）")
     parser.add_argument("--mode", choices=["classic", "vla"], default="classic",
                         help="运行架构模式：classic（传统级联流水线）或 vla（极低功耗快慢分层 VLA 架构，默认 classic）")
@@ -263,6 +301,13 @@ async def amain() -> int:
         "default_cooldown_s", 60)
     log = EventLog(db_path)
     set_default(log)  # skills/*（vision/llm/notify）经 core.log.default() 落库
+    log.log_event("system", "startup", {
+        "pid": os.getpid(),
+        "args": sys.argv[1:],
+        # 只记录源类型，绝不把可能含账号密码的 RTSP 地址写进数据库
+        "video_source_kind": ("camera" if isinstance(config.video_source(), int)
+                              else "file_or_stream"),
+    })
     engine = SceneEngine(config.ROOT / "scenes", state, log, skills=SKILLS,
                          default_cooldown_s=default_cooldown)
 

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 独立看门狗：不依赖主进程存活，每 60 秒检查心跳与就绪状态。
+     告警走 WATCHDOG_WEBHOOK_URL 或 settings.yaml 的 ops.watchdog_webhook_url，
+     与被监控系统使用不同通道。 -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.local.butler.watchdog</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>__PROJECT_DIR__/tools/healthcheck.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/watchdog.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/watchdog.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>__PROJECT_DIR__</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

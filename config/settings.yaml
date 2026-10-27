@@ -13,6 +13,8 @@ camera:
   ring_seconds: 60         # 环形缓冲时长（规范：60 秒）
   ring_width: 640          # 缓冲帧长边（JPEG 存储，1800 帧约 70~120MB）
   ring_jpeg_quality: 60
+  reconnect_s: 2.0         # RTSP/HTTP 网络流断线后的重连间隔
+  stale_s: 10.0            # 超过多少秒没有新帧算“视频流不健康”（/readyz 与看门狗）
 motion:
   trigger_ratio: 0.15            # MOG2 前景像素占比 ≥ 此值 → 判定有运动（触发阈值）
   release_ratio: 0.05            # 占比 < 此值 → 运动结束（释放阈值，滞回防抖）
@@ -139,5 +141,15 @@ voice:
 family_router:
   status_keywords: [在干嘛, 在做什么, 状态怎么样, 查状态, 老人状态, 家里怎么样, 还好吗, 起床了吗, 睡了吗]
   max_status_chars: 24       # 超过此长度的文本一律当留言，避免误判
+
+# 常驻运维（第三阶段：日志、心跳、独立看门狗）
+ops:
+  log_path: logs/butler.log        # 结构化日志（轮转 10MB × 5）
+  heartbeat_path: data/heartbeat.json
+  heartbeat_s: 10.0                # 主进程写心跳的间隔
+  stale_after_s: 180               # 看门狗判定“主进程失联”的阈值
+  watchdog_webhook_url: ""         # 看门狗专用告警通道（与被监控系统独立）
+  watchdog_state_path: data/watchdog_last_alert.json
+  watchdog_repeat_s: 1800          # 同一异常重复告警的最小间隔
 
 roi: {}  # M4 标定工具写入：door_inside / door_outside / bed 等多边形顶点坐标

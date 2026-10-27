@@ -11,6 +11,7 @@ tests/media/
 
 # 运行时产物（SQLite 库、自检样帧等）
 data/
+logs/
 
 # Python
 .venv/
