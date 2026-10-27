@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -16,6 +17,16 @@ from core import bus
 from core.log import default as default_log
 
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+@dataclass(frozen=True)
+class NotificationResult:
+    """一次外部派发的可审计结果；msg_id 仅表示本地落库。"""
+
+    msg_id: int | None
+    attempted: bool
+    delivered: bool
+    channels: dict[str, str]
 
 
 def get_webhook_urls() -> dict[str, str]:
@@ -36,40 +47,108 @@ def get_webhook_urls() -> dict[str, str]:
     }
 
 
-async def _send_one_webhook(client: httpx.AsyncClient, name: str, url: str, payload: dict[str, Any]) -> None:
-    """发送单个 Webhook，静默捕获所有网络与 HTTP 异常，保证不阻断主链路。"""
+def _is_zero_code(value: Any) -> bool:
+    """平台成功码必须是数值零；JSON 的 false 在 Python 里等于 0，必须排除。"""
+    return (isinstance(value, (int, float))
+            and not isinstance(value, bool) and value == 0)
+
+
+def _platform_acknowledged(key: str, resp: httpx.Response) -> bool:
+    """HTTP 2xx 之外再检查平台业务回执，避免签名错误被当成成功。"""
+    if key == "dingtalk":
+        return _is_zero_code(resp.json().get("errcode"))
+    if key == "feishu":
+        return _is_zero_code(resp.json().get("code"))
+    return 200 <= resp.status_code < 300
+
+
+def _format_external_message(msg: str, urgent: bool) -> str:
+    """紧急消息统一前缀；send 与 send_with_receipt 共用，避免两条路径漂移。"""
+    if not urgent:
+        return msg
+    return (msg if (msg.startswith("🚨") or "紧急预警" in msg)
+            else f"🚨【紧急预警】{msg}")
+
+
+async def _send_one_webhook(client: httpx.AsyncClient, key: str, name: str,
+                            url: str, payload: dict[str, Any]) -> tuple[str, int]:
+    """发送单个渠道，返回（结果标签，尝试次数）；只重试临时故障。"""
+    from core import config
     try:
-        resp = await client.post(url, json=payload)
-        if resp.status_code >= 400:
-            print(f"[notify] {name} 推送返回异常状态码: {resp.status_code}")
+        cfg = config.settings().get("notify") or {}
+        max_attempts = max(1, int(cfg.get("max_attempts", 3)))
+        backoff = max(0.0, float(cfg.get("retry_backoff_s", 0.5)))
+    except (TypeError, ValueError):
+        # 配置错误时一个请求都没发出，不能伪报“已尝试”。
+        return "failed", 0
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = await client.post(url, json=payload)
+            if resp.status_code == 429 or resp.status_code >= 500:
+                pass  # 限流和服务端故障可重试
+            elif not 200 <= resp.status_code < 300:
+                return "failed", attempt
+            else:
+                try:
+                    acknowledged = _platform_acknowledged(key, resp)
+                except (ValueError, TypeError, AttributeError):
+                    return "failed", attempt
+                return ("delivered" if acknowledged else "failed"), attempt
+        except httpx.HTTPError as e:
+            print(f"[notify] {name} 第 {attempt} 次网络异常（{type(e).__name__}）")
+
+        if attempt < max_attempts:
+            await asyncio.sleep(backoff * (2 ** (attempt - 1)))
+    return "failed", max_attempts
+
+
+def _record_delivery_result(result: NotificationResult, *,
+                            attempts: dict[str, int] | None = None,
+                            error_type: str | None = None) -> None:
+    """日志故障不得篡改已经取得的平台回执，也不记录敏感配置。"""
+    log = default_log()
+    if log is None:
+        return
+    detail: dict[str, Any] = {"msg_id": result.msg_id, "channels": result.channels}
+    if attempts is not None:
+        detail["attempts"] = attempts
+    if error_type is not None:
+        detail["error_type"] = error_type
+    try:
+        log.log_event("notify", "notify_delivered" if result.delivered else "notify_failed",
+                      detail)
     except Exception as e:
-        print(f"[notify] {name} 推送网络异常（{type(e).__name__}: {e}）")
+        print(f"[notify] 送达结果落库失败（{type(e).__name__}）")
 
 
 async def dispatch_external(formatted_msg: str, *, urgent: bool,
                             direction: str = "to_family", sender: str = "老人",
-                            recipient: str = "家人", msg_id: int | None = None) -> None:
-    """向配置的所有外部渠道（钉钉、飞书、通用 Webhook）派发通知，带有 2.5s 短超时。"""
+                            recipient: str = "家人", msg_id: int | None = None) -> NotificationResult:
+    """并发派发已配置渠道，并返回平台确认后的结构化结果。"""
+    from core import config
     urls = get_webhook_urls()
-    if not any(urls.values()):
-        return
+    if direction != "to_family" or not any(urls.values()):
+        return NotificationResult(msg_id=msg_id, attempted=False,
+                                  delivered=False, channels={})
 
-    coros = []
+    jobs: list[tuple[str, Any]] = []
     try:
-        async with httpx.AsyncClient(timeout=2.5) as client:
+        timeout = float((config.settings().get("notify") or {}).get("timeout_s", 2.5))
+        async with httpx.AsyncClient(timeout=timeout) as client:
             if urls["dingtalk"]:
-                coros.append(_send_one_webhook(client, "钉钉", urls["dingtalk"], {
+                jobs.append(("dingtalk", _send_one_webhook(client, "dingtalk", "钉钉", urls["dingtalk"], {
                     "msgtype": "text",
                     "text": {"content": formatted_msg},
                     "at": {"isAtAll": urgent},
-                }))
+                })))
             if urls["feishu"]:
-                coros.append(_send_one_webhook(client, "飞书", urls["feishu"], {
+                jobs.append(("feishu", _send_one_webhook(client, "feishu", "飞书", urls["feishu"], {
                     "msg_type": "text",
                     "content": {"text": formatted_msg},
-                }))
+                })))
             if urls["generic"]:
-                coros.append(_send_one_webhook(client, "通用Webhook", urls["generic"], {
+                jobs.append(("generic", _send_one_webhook(client, "generic", "通用Webhook", urls["generic"], {
                     "title": "🚨【紧急预警】" if urgent else "【管家通知】",
                     "text": formatted_msg,
                     "msg": formatted_msg,
@@ -81,11 +160,39 @@ async def dispatch_external(formatted_msg: str, *, urgent: bool,
                     "recipient": recipient,
                     "direction": direction,
                     "msg_id": msg_id,
-                }))
-            if coros:
-                await asyncio.gather(*coros, return_exceptions=True)
+                })))
+            if not jobs:
+                return NotificationResult(msg_id=msg_id, attempted=False,
+                                          delivered=False, channels={})
+            raw_results = await asyncio.gather(
+                *(job for _name, job in jobs), return_exceptions=True)
+
+        channels: dict[str, str] = {}
+        attempts: dict[str, int] = {}
+        for (name, _job), raw in zip(jobs, raw_results):
+            if isinstance(raw, Exception):
+                channels[name], attempts[name] = "failed", 0
+            else:
+                channels[name], attempts[name] = raw
+        result = NotificationResult(
+            msg_id=msg_id,
+            attempted=any(n > 0 for n in attempts.values()),
+            delivered=any(v == "delivered" for v in channels.values()),
+            channels=channels,
+        )
+        _record_delivery_result(result, attempts=attempts)
+        return result
     except Exception as e:
-        print(f"[notify] 外部推送客户端异常（{type(e).__name__}: {e}）")
+        print(f"[notify] 外部推送客户端异常（{type(e).__name__}）")
+        channels = {name: "failed" for name, url in urls.items() if url}
+        result = NotificationResult(
+            msg_id=msg_id,
+            attempted=bool(jobs),  # 客户端都建不起来时一个请求都没发
+            delivered=False,
+            channels=channels,
+        )
+        _record_delivery_result(result, error_type=type(e).__name__)
+        return result
 
 
 async def wait_pending() -> None:
@@ -96,7 +203,8 @@ async def wait_pending() -> None:
 
 async def send(msg: str, urgent: bool = False, *,
                direction: str = "to_family", sender: str = "老人",
-               recipient: str = "家人", wait_dispatch: bool = False) -> int | None:
+               recipient: str = "家人", wait_dispatch: bool = False,
+               _dispatch: bool = True) -> int | None:
     """发一条消息给家人端，返回消息 id（未落库时 None）。绝不抛异常。"""
     msg = (msg or "").strip()
     if not msg:
@@ -117,10 +225,8 @@ async def send(msg: str, urgent: bool = False, *,
     print(f"[notify→{direction}] {tag}{msg}")
 
     # 外部渠道推送（仅向家人方向的消息推送）
-    if direction == "to_family":
-        formatted_msg = (
-            msg if (msg.startswith("🚨") or "紧急预警" in msg) else f"🚨【紧急预警】{msg}"
-        ) if urgent else msg
+    if direction == "to_family" and _dispatch:
+        formatted_msg = _format_external_message(msg, urgent)
 
         try:
             task = asyncio.create_task(
@@ -141,3 +247,24 @@ async def send(msg: str, urgent: bool = False, *,
             print(f"[notify] 创建外部推送后台任务失败（{type(e).__name__}: {e}）")
 
     return msg_id
+
+
+async def send_with_receipt(msg: str, urgent: bool = False, *,
+                            direction: str = "to_family", sender: str = "老人",
+                            recipient: str = "家人") -> NotificationResult:
+    """等待外部平台回执；本地消息仍通过原 send 路径落库和广播。"""
+    msg = (msg or "").strip()
+    msg_id = await send(
+        msg, urgent=urgent, direction=direction, sender=sender,
+        recipient=recipient, wait_dispatch=False, _dispatch=False)
+    if direction != "to_family" or not msg:
+        return NotificationResult(msg_id=msg_id, attempted=False,
+                                  delivered=False, channels={})
+    formatted_msg = _format_external_message(msg, urgent)
+    result = await dispatch_external(
+        formatted_msg, urgent=urgent, direction=direction,
+        sender=sender, recipient=recipient, msg_id=msg_id)
+    if not result.delivered and not result.attempted:
+        # 无渠道或客户端未建立：安全场景同样要留下“未外部送达”的审计记录。
+        _record_delivery_result(result)
+    return result

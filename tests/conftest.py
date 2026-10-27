@@ -21,3 +21,18 @@ def _spoken(monkeypatch):
     monkeypatch.setattr(tts, "_tts_settings",
                         lambda: {"tail_silence_ms": 1, "voice": "Tingting"})
     return spoken
+
+
+@pytest.fixture(autouse=True)
+def _block_cloud_network(monkeypatch):
+    """默认禁止真实模型调用；单测可用自己的 monkeypatch 显式覆盖。"""
+    from skills import llm, vision
+
+    def blocked(*args, **kwargs):
+        raise RuntimeError("测试禁网：请用 monkeypatch 替换模型调用边界")
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(vision, "_CLIENT", None)
+    monkeypatch.setattr(vision, "_chat_sync", blocked)
+    # llm 在 import 时从 vision 复制了 _chat_sync 引用，必须分别拦截。
+    monkeypatch.setattr(llm, "_chat_sync", blocked)

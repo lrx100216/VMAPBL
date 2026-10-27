@@ -228,7 +228,9 @@ async def run_perception(*, camera: Camera | None = None,
                                                 "pre_quiet_spike": round(spike, 4)}})
                 _log_line(f"持续静止 {still.still_seconds:.0f}s → is_still=True"
                           f"（静止前峰值 {spike:.1%}，已发 sensor.still）")
-                if spike >= spike_ratio and st.occupancy:
+                occupancy_at_quiet = (
+                    quiet_since is not None and occ.occupied(quiet_since))
+                if spike >= spike_ratio and occupancy_at_quiet:
                     bus.publish_nowait({"type": "sensor.sudden_still", "ts": ts,
                                         "payload": {"after_s": still.still_seconds,
                                                     "spike_ratio": round(spike, 4),

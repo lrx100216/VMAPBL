@@ -659,6 +659,81 @@ async def test_wakeup_out_of_bed_does_nothing(fake_settings, _spoken):
     assert r["act"] == "none" and _spoken == []
 
 
+async def test_wakeup_first_unknown_no_reply_notifies_normal(
+        fake_settings, _spoken, monkeypatch):
+    from actions import wakeup
+    from skills import stt
+    sent = []
+
+    async def fake_notify(msg, *, urgent):
+        sent.append((msg, urgent))
+
+    monkeypatch.setattr(wakeup, "notify_send", fake_notify)
+    monkeypatch.setattr(stt, "listen", lambda *a, **kw: _reply(""))
+    wakeup.reset_pending()
+    perception.clear_current()
+
+    result = await wakeup.wakeup_check({})
+    assert result["phase"] == "first"
+    assert result["end"] == "no_reply"
+    assert len(sent) == 1 and sent[0][1] is False
+    assert "无应答" in sent[0][0]
+    assert wakeup._pending["date"] is None
+
+
+async def test_wakeup_recheck_no_reply_notifies_urgent(
+        fake_settings, _spoken, monkeypatch):
+    from actions import wakeup
+    from skills import stt
+    sent = []
+
+    async def fake_notify(msg, *, urgent):
+        sent.append((msg, urgent))
+
+    monkeypatch.setattr(wakeup, "notify_send", fake_notify)
+    monkeypatch.setattr(stt, "listen", lambda *a, **kw: _reply(""))
+    wakeup.reset_pending()
+    perception.register_current(
+        make_hist([(0.0, make_pose(bbox=(150, 150, 250, 350)))]))
+
+    first = await wakeup.wakeup_check({})
+    assert first["act"] == "remind"
+    result = await wakeup.wakeup_check({})
+    assert result["phase"] == "recheck"
+    assert result["end"] == "no_reply"
+    assert len(sent) == 1 and sent[0][1] is True
+    assert "无应答" in sent[0][0]
+    assert wakeup._pending["date"] is None
+
+
+async def test_wakeup_no_reply_notification_survives_audit_failure(
+        fake_settings, _spoken, monkeypatch):
+    """审计写库失败不得阻断未起床的安全通知。"""
+    from actions import wakeup
+    from skills import stt
+    sent = []
+
+    class _BrokenLog:
+        def log_event(self, *args, **kwargs):
+            raise RuntimeError("模拟 SQLite 写失败")
+
+    async def fake_notify(msg, *, urgent):
+        sent.append((msg, urgent))
+
+    monkeypatch.setattr(wakeup, "default_log", lambda: _BrokenLog())
+    monkeypatch.setattr(wakeup, "notify_send", fake_notify)
+    monkeypatch.setattr(stt, "listen", lambda *a, **kw: _reply(""))
+    wakeup.reset_pending()
+    perception.register_current(
+        make_hist([(0.0, make_pose(bbox=(150, 150, 250, 350)))]))
+
+    first = await wakeup.wakeup_check({})
+    assert first["act"] == "remind"
+    result = await wakeup.wakeup_check({})
+    assert result["end"] == "no_reply"
+    assert len(sent) == 1 and sent[0][1] is True
+
+
 async def _reply(text: str) -> str:
     return text
 

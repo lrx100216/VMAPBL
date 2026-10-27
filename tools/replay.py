@@ -162,6 +162,7 @@ def run_replay(scene_id: str, videos: list[Path], expect: str,
     orig_runner = _tts._runner
     orig_listen = _stt.listen
     orig_send = _notify.send
+    orig_receipt = _notify.send_with_receipt
     spoken: list[str] = []
     notifications: list[dict] = []
 
@@ -177,6 +178,14 @@ def run_replay(scene_id: str, videos: list[Path], expect: str,
         notifications.append({"msg": msg, "urgent": urgent})
         return 1  # 模拟落库成功（不真写库）
     _notify.send = _counting_send
+
+    async def _muted_receipt(msg, urgent=False, **kw):
+        notifications.append({"msg": msg, "urgent": urgent})
+        # 回放语义：视为已通知（不真的外发），与旧 msg_id=1 的行为一致。
+        return _notify.NotificationResult(
+            msg_id=1, attempted=True, delivered=True,
+            channels={"replay": "delivered"})
+    _notify.send_with_receipt = _muted_receipt
 
     runs = []
     t0 = time.monotonic()
@@ -206,6 +215,7 @@ def run_replay(scene_id: str, videos: list[Path], expect: str,
         _tts._runner = orig_runner
         _stt.listen = orig_listen
         _notify.send = orig_send
+        _notify.send_with_receipt = orig_receipt
     correct = sum(1 for x in runs if x["correct"])
     return {"scene": scene_id, "expect": expect, "runs": runs,
             "total": len(runs), "correct": correct,

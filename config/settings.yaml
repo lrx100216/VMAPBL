@@ -124,5 +124,8 @@ notify:
   dingtalk_webhook: ""       # 钉钉自定义机器人 Webhook 地址
   feishu_webhook: ""         # 飞书自定义机器人 Webhook 地址
   webhook_url: ""            # 通用 Webhook (HomeAssistant, ServerChan, PushPlus, Bark)
+  timeout_s: 2.5             # 单次平台请求超时
+  max_attempts: 3            # 网络错误、429、5xx 的单渠道最大尝试次数
+  retry_backoff_s: 0.5       # 指数退避基数；测试注入 0
 
 roi: {}  # M4 标定工具写入：door_inside / door_outside / bed 等多边形顶点坐标

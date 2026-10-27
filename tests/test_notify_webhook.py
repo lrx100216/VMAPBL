@@ -70,7 +70,8 @@ async def test_notify_external_dispatch_dingtalk_feishu_generic(monkeypatch):
 
     async def fake_post(self, url, *args, **kwargs):
         captured_requests.append({"url": str(url), "json": kwargs.get("json")})
-        return httpx.Response(200, json={"errcode": 0})
+        body = {"code": 0} if "feishu" in str(url) else {"errcode": 0}
+        return httpx.Response(200, json=body)
 
     monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
 

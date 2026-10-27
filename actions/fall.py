@@ -95,8 +95,9 @@ async def fall_confirm(ctx: dict) -> str:
       不通知家人（老人自己说没事，就是没事——误报由本人一票否决）；
     - 其余（求助词/答非所问/无应答）→ 紧急通知家人，并开启
       re_alert_s 防重复静默。无应答本身就是高危信号（规范：漏报是安全事件）。
-      通知落库成功（msg_id 非 None）才武装静默——通知失败时保持可重试，
-      绝不进入「已静默但家人端没收到」的漏报状态。
+      至少一个外部通知渠道明确确认送达（receipt.delivered=True）才武装静默——
+      本地落库不算外部送达；未送达时保持可重试，绝不进入「已静默但家人没收到」
+      的漏报状态。
     """
     from skills import notify, stt, tts  # 唯一收声/发声/通知出口（接口契约）
 
@@ -114,11 +115,11 @@ async def fall_confirm(ctx: dict) -> str:
 
     global _stopped_until
     if reply:
-        msg_id = await notify.send(f"疑似跌倒！老人语音回复：「{reply}」，"
-                                   "请立即查看！", urgent=True)
+        receipt = await notify.send_with_receipt(
+            f"疑似跌倒！老人语音回复：「{reply}」，请立即查看！", urgent=True)
     else:
-        msg_id = await notify.send("疑似跌倒且语音询问无应答，请立即查看！",
-                                   urgent=True)
-    if msg_id is not None:
+        receipt = await notify.send_with_receipt(
+            "疑似跌倒且语音询问无应答，请立即查看！", urgent=True)
+    if receipt.delivered:
         _stopped_until = time.time() + float(cfg.get("re_alert_s", 1800))
     return "alerted"

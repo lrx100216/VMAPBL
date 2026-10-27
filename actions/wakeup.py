@@ -11,7 +11,7 @@
                        无法判断=当场语音确认（不置 pending）；
 - pending=今天日期   → 复查（09:00）：仍躺着 → 语音询问；其余情况清零收尾。
 语音确认/询问的回复经 _urgent_in_reply 过关键词，命中才发最高紧急；
-普通回复发非紧急通报；没回复只落库（不臆测）。
+普通回复发非紧急通报；首检无应答发普通跟进，复查无应答发紧急通知。
 """
 from __future__ import annotations
 
@@ -55,8 +55,9 @@ def _urgent_in_reply(reply: str, keywords: list[str]) -> bool:
     return any(k in reply for k in keywords)
 
 
-async def _voice_check(ctx: dict, question: str, *, phase: str) -> str:
-    """语音确认/询问：问 → 听 → 关键词分级通知。返回末态字符串（落库用）。"""
+async def _voice_check(ctx: dict, question: str, *, phase: str,
+                       no_reply_urgent: bool) -> str:
+    """语音确认/询问：问 → 听 → 关键词分级通知；无应答按阶段分级。"""
     from skills import stt, tts  # 唯一收声/发声出口（接口契约）
 
     await tts.speak(question)
@@ -66,7 +67,16 @@ async def _voice_check(ctx: dict, question: str, *, phase: str) -> str:
     log = default_log()
     if not reply:
         if log is not None:
-            log.log_event("wake_up", "wakeup_voice", {"phase": phase, "reply": ""})
+            try:
+                log.log_event("wake_up", "wakeup_voice",
+                              {"phase": phase, "reply": ""})
+            except Exception as e:
+                # 审计写库失败不得阻断后面的安全通知
+                print(f"[wakeup] 审计落库失败（{type(e).__name__}），继续通知")
+        level = "紧急" if no_reply_urgent else "普通跟进"
+        await notify_send(
+            f"老人晨间{phase}语音询问无应答（{level}），请电话联系确认。",
+            urgent=no_reply_urgent)
         return "no_reply"
     if _urgent_in_reply(reply, keywords):
         await notify_send(f"老人晨间{phase}回复求助：「{reply}」", urgent=True)
@@ -100,14 +110,16 @@ async def wakeup_check(ctx: dict) -> dict:
             _pending["date"] = today  # 09:00 复查
             return {"phase": "first", "verdict": verdict, "act": "remind"}
         # 无法判断：当场语音确认，不升级、不置 pending（规范硬语义）
-        end = await _voice_check(ctx, "奶奶，您在吗？还好吗？", phase="确认")
+        end = await _voice_check(
+            ctx, "奶奶，您在吗？还好吗？", phase="确认", no_reply_urgent=False)
         return {"phase": "first", "verdict": verdict, "act": "voice_check",
                 "end": end}
 
     # 复查（09:00，pending 已置）
     if verdict == "in_bed":
         end = await _voice_check(
-            ctx, "奶奶，您还好吗？不舒服就跟我说一声。", phase="询问")
+            ctx, "奶奶，您还好吗？不舒服就跟我说一声。",
+            phase="询问", no_reply_urgent=True)
         reset_pending()
         return {"phase": "recheck", "verdict": verdict, "act": "voice_ask",
                 "end": end}

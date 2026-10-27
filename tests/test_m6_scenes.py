@@ -184,6 +184,17 @@ def test_classify_fall_insufficient_and_standing():
 
 # ---------- 场景7：fall_decide / fall_confirm ----------
 
+
+def _receipt(*, delivered: bool):
+    from skills.notify import NotificationResult
+    return NotificationResult(
+        msg_id=1,
+        attempted=True,
+        delivered=delivered,
+        channels={"dingtalk": "delivered" if delivered else "failed"},
+    )
+
+
 async def test_fall_decide_verdicts(fall_settings):
     from actions import fall
     seq = ([_fall_pose(480, 5)] * 4
@@ -221,8 +232,8 @@ async def test_fall_confirm_distress_beats_fine_words(fall_settings, monkeypatch
 
     async def fake_send(msg, urgent=False, **kw):
         sent.append((msg, urgent))
-        return 1                       # 模拟落库成功：通知送达才武装防重复静默
-    monkeypatch.setattr(notify, "send", fake_send)
+        return _receipt(delivered=True)  # 模拟外部平台确认送达
+    monkeypatch.setattr(notify, "send_with_receipt", fake_send)
     monkeypatch.setattr(stt, "listen",
                         lambda *a, **kw: _reply("我没事，就是摔了一下有点疼"))
     assert await fall.fall_confirm({}) == "alerted"
@@ -239,8 +250,8 @@ async def test_fall_confirm_no_reply_alerts_then_suppresses(
 
     async def fake_send(msg, urgent=False, **kw):
         sent.append((msg, urgent))
-        return 1                       # 通知送达成功 → 才进入静默
-    monkeypatch.setattr(notify, "send", fake_send)
+        return _receipt(delivered=True)  # 通知送达成功 → 才进入静默
+    monkeypatch.setattr(notify, "send_with_receipt", fake_send)
     monkeypatch.setattr(stt, "listen", lambda *a, **kw: _reply(""))
     assert await fall.fall_confirm({}) == "alerted"
     assert sent and sent[0][1] is True and "无应答" in sent[0][0]
@@ -251,16 +262,15 @@ async def test_fall_confirm_no_reply_alerts_then_suppresses(
 
 async def test_fall_confirm_delivery_failure_keeps_retryable(
         fall_settings, monkeypatch):
-    """回归 F3：通知落库失败（msg_id=None）→ 不武装静默，保持可重试——
-    绝不进入「已静默但家人端没收到」的漏报状态。"""
+    """本地消息已保存但外部未送达时，不武装静默，保持后续重试机会。"""
     from actions import fall
     from skills import notify, stt
     sent = []
 
     async def fake_send(msg, urgent=False, **kw):
         sent.append((msg, urgent))
-        return None                    # 模拟落库/发布失败
-    monkeypatch.setattr(notify, "send", fake_send)
+        return _receipt(delivered=False)  # 本地已保存，外部未送达
+    monkeypatch.setattr(notify, "send_with_receipt", fake_send)
     monkeypatch.setattr(stt, "listen", lambda *a, **kw: _reply(""))
     assert await fall.fall_confirm({}) == "alerted"
     assert sent and sent[0][1] is True
@@ -496,11 +506,13 @@ def _spike_frames(rect, n_black=6, n_rect=25, fps=10):
 
 
 async def _run_and_collect(frames, *, hold_s, spike_ratio,
-                           still_seconds=1.0, spike_window_s=3.0):
+                           still_seconds=1.0, spike_window_s=3.0,
+                           pose=None):
     from sensors.motion import OccupancyTracker
     from sensors.perception import run_perception
     from test_m4_perception import _FakeCamera, _FakePose
     sudden, stills = [], []
+    pose = pose or _FakePose()
 
     async def on_sudden(e):
         sudden.append(e)
@@ -515,7 +527,7 @@ async def _run_and_collect(frames, *, hold_s, spike_ratio,
         await run_perception(
             camera=_FakeCamera(frames),
             gate=MotionGate(0.15, 0.05, proc_width=64, morph_kernel=1),
-            pose=_FakePose(), occ=OccupancyTracker(hold_s=hold_s),
+            pose=pose, occ=OccupancyTracker(hold_s=hold_s),
             still=StillDetector(still_seconds=still_seconds), st=StateStore(),
             pose_interval_s=0.1, spike_ratio=spike_ratio,
             spike_window_s=spike_window_s, echo=False)
@@ -545,16 +557,17 @@ async def test_perception_small_motion_no_sudden_still():
     assert sudden == []
 
 
-async def test_perception_sudden_still_requires_person_present():
-    """有突变但静止时人已离开画面（occupancy off）→ 不许发 sudden_still。"""
+async def test_perception_sudden_still_allows_confirmation_after_person_loss():
+    """曾见人后离开与跌倒后姿态丢失不可区分时，允许进入候选和二次确认。"""
     from test_m4_perception import _frame_with_rect
     frames = ([(i / 10, _frame_with_rect()) for i in range(1, 7)]
               + [(i / 10, _frame_with_rect(rect=(16, 16, 48, 48)))
                  for i in range(7, 9)]              # 人只出现 0.2s 就离开
               + [(i / 10, _frame_with_rect()) for i in range(9, 32)])
     sudden, stills = await _run_and_collect(frames, hold_s=0.3, spike_ratio=0.20)
-    assert len(stills) == 1          # 静止照常发
-    assert sudden == []              # 但没人 → 跌倒候选不成立
+    assert len(stills) == 1
+    # 这里只进入候选和二次确认，不等于直接报警；真正无人负例由 _NeverPersonPose 覆盖。
+    assert len(sudden) == 1
 
 
 def _spike_then_long_quiet_frames(rect, fps=10):
@@ -569,6 +582,50 @@ def _spike_then_long_quiet_frames(rect, fps=10):
     return ([(i / fps, black) for i in range(1, 7)]       # 0.1~0.6 warmup
             + [(i / fps, r) for i in range(7, 12)]        # 0.7~1.1 突变 5 帧
             + [(i / fps, r) for i in range(12, 72)])      # 1.2~7.1 静止
+
+
+class _FirstSeenThenLostPose:
+    def __init__(self):
+        self.calls = 0
+        self.loaded_path = Path("fake-pose.pt")
+
+    def infer(self, frame):
+        self.calls += 1
+        if self.calls == 1 and (frame > 200).mean() > 0.05:
+            return [PersonPose(bbox=np.array([16., 16., 48., 48.]),
+                               keypoints=np.zeros((17, 2)),
+                               kconf=np.full(17, 0.9), conf=0.9)]
+        return []
+
+
+class _NeverPersonPose(_FirstSeenThenLostPose):
+    def infer(self, frame):
+        self.calls += 1
+        return []
+
+
+async def test_perception_sudden_still_survives_pose_loss():
+    """静止开始时尚在驻留窗口内的人，不能因静止等待期姿态丢失而被吞掉。"""
+    pose = _FirstSeenThenLostPose()
+    frames = _spike_then_long_quiet_frames(rect=(16, 16, 48, 48))
+    sudden, stills = await _run_and_collect(
+        frames, hold_s=3.0, spike_ratio=0.20,
+        still_seconds=5.0, spike_window_s=3.0, pose=pose)
+    assert len(stills) == 1
+    assert len(sudden) == 1
+    # 实测 71 帧只推理 23 次；放宽到 30 仍能挡住“每帧推理/增大 hold_s”的伪修复。
+    assert pose.calls <= 30
+
+
+async def test_perception_sudden_still_requires_person_at_quiet_start():
+    """从未确认人形时，运动突变不能单独构成跌倒候选。"""
+    pose = _NeverPersonPose()
+    frames = _spike_then_long_quiet_frames(rect=(16, 16, 48, 48))
+    sudden, stills = await _run_and_collect(
+        frames, hold_s=3.0, spike_ratio=0.20,
+        still_seconds=5.0, spike_window_s=3.0, pose=pose)
+    assert len(stills) == 1
+    assert sudden == []
 
 
 async def test_perception_sudden_still_anchor_survives_long_still():
@@ -607,8 +664,8 @@ async def test_fall_confirm_real_distress_still_alerts(fall_settings, monkeypatc
 
     async def fake_send(msg, urgent=False, **kw):
         sent.append((msg, urgent))
-        return 1                       # 通知送达成功 → 才进入静默
-    monkeypatch.setattr(notify, "send", fake_send)
+        return _receipt(delivered=True)  # 通知送达成功 → 才进入静默
+    monkeypatch.setattr(notify, "send_with_receipt", fake_send)
     monkeypatch.setattr(stt, "listen",
                         lambda *a, **kw: _reply("我没事，就是摔了一下有点疼"))
     assert await fall.fall_confirm({}) == "alerted"
@@ -624,7 +681,8 @@ async def test_fall_scene_uncertain_chain_via_engine(tmp_path, fall_settings,
 
     async def fake_send(msg, urgent=False, **kw):
         sent.append((msg, urgent))
-    monkeypatch.setattr(notify, "send", fake_send)
+        return _receipt(delivered=True)
+    monkeypatch.setattr(notify, "send_with_receipt", fake_send)
     monkeypatch.setattr(stt, "listen", lambda *a, **kw: _reply(""))
 
     yaml_text = (ROOT / "scenes" / "fall.yaml").read_text(encoding="utf-8")
