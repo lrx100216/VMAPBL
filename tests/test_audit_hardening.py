@@ -74,11 +74,13 @@ async def test_vla_safety_inquiry_unresponsive_closure(tmp_path):
         }],
     })
 
-    # 模拟 dispatch_action：老人无回复（reply=""）
+    # 模拟 dispatch_action：老人无回复（reply=""），通知已送达
     async def mock_dispatch(action, state, log):
         act_dict = action.to_dict() if hasattr(action, "to_dict") else dict(action)
         if act_dict.get("type") == ActionType.SPEAK.value:
             return {"status": "success", "reply": ""}
+        if act_dict.get("type") == ActionType.NOTIFY_FAMILY.value:
+            return {"status": "success", "delivered": True}
         return {"status": "success"}
 
     with patch("core.vla_agent.dispatch_action", side_effect=mock_dispatch):

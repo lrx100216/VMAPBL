@@ -19,6 +19,7 @@ from core.vla_agent import (
 )
 from core.state import StateStore
 from core.log import EventLog
+from skills.notify import NotificationResult
 
 
 @pytest.fixture(autouse=True)
@@ -197,11 +198,13 @@ async def test_dispatch_action_all_types(monkeypatch):
 
         async def mock_send(msg, urgent=False, **kwargs):
             sent_notifications.append({"msg": msg, "urgent": urgent})
-            return 101
+            return NotificationResult(msg_id=101, attempted=True,
+                                      delivered=True,
+                                      channels={"dingtalk": "delivered"})
 
         monkeypatch.setattr("skills.tts.speak", mock_speak)
         monkeypatch.setattr("skills.stt.listen", mock_listen)
-        monkeypatch.setattr("skills.notify.send", mock_send)
+        monkeypatch.setattr("skills.notify.send_with_receipt", mock_send)
 
         # 1. SPEAK with listen
         res_speak = await dispatch_action(
@@ -222,6 +225,7 @@ async def test_dispatch_action_all_types(monkeypatch):
         )
         assert res_notify["status"] == "ok"
         assert res_notify["msg_id"] == 101
+        assert res_notify["delivered"] is True
         assert len(sent_notifications) == 1
 
         # 3. RECORD_MEDICATION
@@ -343,4 +347,86 @@ async def test_main_cli_vla_mode(monkeypatch):
     assert len(ran_vla) == 1
     assert ran_vla[0]["trigger_reason"] == "medication"
     assert ran_vla[0]["speech_text"] == "早药"
+
+
+@pytest.mark.asyncio
+async def test_vla_stop_alert_requires_delivered_notification(tmp_path, monkeypatch):
+    """VLA 的静默必须等家人通知真正送达，否则一次未送达就静默 30 分钟。"""
+    from core import vla_agent
+
+    log = EventLog(tmp_path / "vla.db")
+    store = StateStore()
+    vla_agent.reset_silence()
+
+    class _Policy:
+        def __init__(self, actions):
+            self.actions = actions
+
+        async def decide(self, obs):
+            return {"scene_understanding": "测试", "safety_risk": "emergency",
+                    "elder_intent": "none", "actions": self.actions}
+
+    actions = [
+        {"type": "NOTIFY_FAMILY", "payload": {"msg": "跌倒报警", "urgent": True}},
+        {"type": "STOP_ALERT", "payload": {"duration_s": 300.0}},
+    ]
+
+    async def delivered(msg, urgent=False, **kwargs):
+        return NotificationResult(1, True, True, {"dingtalk": "delivered"})
+
+    monkeypatch.setattr("skills.notify.send_with_receipt", delivered)
+    result = await decide_and_act({"trigger_reason": "sensor.sudden_still"},
+                                  state=store, log=log, policy=_Policy(actions))
+    assert vla_agent.is_alert_silenced()
+    assert any(r.get("type") == "STOP_ALERT" and r.get("status") == "ok"
+               for r in result["action_results"])
+    vla_agent.reset_silence()
+
+    async def failed(msg, urgent=False, **kwargs):
+        return NotificationResult(1, True, False, {"dingtalk": "failed"})
+
+    monkeypatch.setattr("skills.notify.send_with_receipt", failed)
+    result = await decide_and_act({"trigger_reason": "sensor.sudden_still"},
+                                  state=store, log=log, policy=_Policy(actions))
+    assert not vla_agent.is_alert_silenced()
+    assert any(r.get("type") == "STOP_ALERT" and r.get("status") == "skipped"
+               for r in result["action_results"])
+    log.close()
+
+
+@pytest.mark.asyncio
+async def test_vla_unanswered_check_without_delivery_does_not_silence(
+        tmp_path, monkeypatch):
+    """安全问询无应答但外部未送达：必须保留后续再次告警的机会。"""
+    from core import vla_agent
+
+    log = EventLog(tmp_path / "vla2.db")
+    store = StateStore()
+    vla_agent.reset_silence()
+
+    class _Policy:
+        async def decide(self, obs):
+            return {"scene_understanding": "疑似跌倒", "safety_risk": "warning",
+                    "elder_intent": "none",
+                    "actions": [{"type": "SPEAK",
+                                 "payload": {"text": "奶奶您还好吗",
+                                             "listen_reply_s": 5.0}}]}
+
+    async def mock_dispatch(action, state, log):
+        act = action.to_dict() if hasattr(action, "to_dict") else dict(action)
+        if act.get("type") == "SPEAK":
+            return {"status": "ok", "reply": ""}
+        if act.get("type") == "NOTIFY_FAMILY":
+            return {"status": "ok", "delivered": False}
+        return {"status": "ok"}
+
+    monkeypatch.setattr("core.vla_agent.dispatch_action", mock_dispatch)
+    result = await vla_agent.decide_and_act(
+        {"trigger_reason": "sensor.sudden_still"},
+        state=store, log=log, policy=_Policy())
+    types = [a.get("type") for a in result["actions"]]
+    assert "NOTIFY_FAMILY" in types
+    assert "STOP_ALERT" not in types
+    assert not vla_agent.is_alert_silenced()
+    log.close()
 

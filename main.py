@@ -89,7 +89,8 @@ async def _perceive_loop(engine: SceneEngine) -> int:
     return 0
 
 
-async def _heartbeat_loop(log: EventLog, voice_task=None) -> None:
+async def _heartbeat_loop(log: EventLog, voice_task=None,
+                          stop_event: asyncio.Event | None = None) -> None:
     """周期写心跳文件：独立看门狗只读它判断主进程是否还在看护。"""
     from core.health import readiness
     from core.heartbeat import write_heartbeat
@@ -98,7 +99,7 @@ async def _heartbeat_loop(log: EventLog, voice_task=None) -> None:
     ops = config.settings().get("ops") or {}
     path = config.ROOT / str(ops.get("heartbeat_path", "data/heartbeat.json"))
     interval = max(1.0, float(ops.get("heartbeat_s", 10.0)))
-    while True:
+    while not (stop_event is not None and stop_event.is_set()):
         try:
             ready, snap = readiness(camera=get_current(), log=log)
             snap.update({
@@ -112,6 +113,46 @@ async def _heartbeat_loop(log: EventLog, voice_task=None) -> None:
         except Exception as e:
             print(f"[heartbeat] 写入失败（{type(e).__name__}）")
         await asyncio.sleep(interval)
+
+
+def _wire_vla(engine: SceneEngine) -> None:
+    """VLA 模式接线：定时、语音与家人事件。
+
+    `sensor.*` 不接场景——这些事件由 VLA 自己消费，再接场景会让同一次跌倒
+    双重确认、双重告警。
+    """
+    engine.wire_time_triggers()
+    engine.wire_speech_triggers()
+    engine.wire_event_triggers(skip_prefixes=("sensor.",))
+
+
+async def _start_ops_tasks(log: EventLog):
+    """启动常驻语音与心跳（classic 与 VLA 共用），返回 (stop_event, voice, heartbeat)。"""
+    voice_stop = asyncio.Event()
+    voice_task = None
+    voice_cfg = config.settings().get("voice") or {}
+    if voice_cfg.get("enabled_in_serve", True):
+        from skills import stt
+        from skills.voice_loop import start_voice_loop
+        print("⏳ 正在预热语音模型……", flush=True)
+        await asyncio.get_running_loop().run_in_executor(None, stt.warmup)
+        voice_task = start_voice_loop(stop_event=voice_stop)
+    heartbeat_task = asyncio.create_task(
+        _heartbeat_loop(log, voice_task), name="heartbeat")
+    return voice_stop, voice_task, heartbeat_task
+
+
+async def _stop_ops_tasks(voice_stop: asyncio.Event, voice_task,
+                          heartbeat_task) -> None:
+    voice_stop.set()
+    for task in (voice_task, heartbeat_task):
+        if task is None:
+            continue
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
@@ -139,17 +180,6 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
     print("⏳ 正在预热姿态模型（消除运行期首帧卡顿）……", flush=True)
     await asyncio.get_running_loop().run_in_executor(None, pose_est.warmup)
 
-    # 第二阶段：常驻语音回路与感知并行；安全确认走前景抢占（stt.listen 默认）
-    voice_stop = asyncio.Event()
-    voice_task = None
-    voice_cfg = _cfg.settings().get("voice") or {}
-    if voice_cfg.get("enabled_in_serve", True):
-        from skills import stt
-        from skills.voice_loop import start_voice_loop
-        print("⏳ 正在预热语音模型……", flush=True)
-        await asyncio.get_running_loop().run_in_executor(None, stt.warmup)
-        voice_task = start_voice_loop(stop_event=voice_stop)
-
     hub = PushHub()
     app = create_app(state=state, engine=engine, log=log, hub=hub)
     srv = _cfg.settings().get("server", {})
@@ -163,9 +193,8 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
             break
         await asyncio.sleep(0.05)
 
-    # 服务确实起来后再启动心跳，避免端口占用等启动失败留下孤儿任务
-    heartbeat_task = asyncio.create_task(
-        _heartbeat_loop(log, voice_task), name="heartbeat")
+    # 服务确实起来后再启动语音与心跳，避免端口占用等启动失败留下孤儿任务
+    voice_stop, voice_task, heartbeat_task = await _start_ops_tasks(log)
 
     print(f"🌐 家人端控制台：http://{host}:{port}")
     print(f"🎙 常驻语音回路：{'已启动' if voice_task else '未启用'}"
@@ -176,18 +205,7 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n服务退出。")
     finally:
-        voice_stop.set()
-        if voice_task is not None:
-            voice_task.cancel()
-            try:
-                await voice_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        heartbeat_task.cancel()
-        try:
-            await heartbeat_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        await _stop_ops_tasks(voice_stop, voice_task, heartbeat_task)
         server.should_exit = True  # 优雅停服（比 cancel 干净，无 lifespan 噪音）
         try:
             await asyncio.wait_for(asyncio.shield(server_task), timeout=3.0)
@@ -197,14 +215,17 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
     return 0
 
 
-async def _vla_perceive_loop(log: EventLog) -> int:
+async def _vla_perceive_loop(engine: SceneEngine, log: EventLog) -> int:
     """快慢分层 VLA 极低功耗感知主回路（CPU < 1%）：
     5fps EdgeSentinel 帧差 + 声音能量监测 -> 突变/事件激活 -> VLAPolicy 多模态端到端决策与动作分发。
+
+    与 classic 一样接线定时/语音/家人事件；`sensor.*` 留给 VLA 自己消费。
     """
     from sensors.camera import Camera
     from sensors.sentinel import EdgeSentinel, run_sentinel
     from core.vla_agent import decide_and_act
 
+    _wire_vla(engine)
     cam = Camera.from_settings()
     sentinel = EdgeSentinel.from_settings()
 
@@ -221,11 +242,18 @@ async def _vla_perceive_loop(log: EventLog) -> int:
         print(f"\n哨兵性能统计: {stats}")
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\nVLA 模式退出。")
+    finally:
+        engine.unwire()
+        cam.stop()
     return 0
 
 
 async def _vla_serve_loop(engine: SceneEngine, log: EventLog) -> int:
-    """VLA 模式完整系统：超低功耗哨兵 + 家人端控制台（FastAPI/WebSocket）同 loop 常驻。"""
+    """VLA 模式完整系统：超低功耗哨兵 + 常驻语音 + 心跳 + 家人端控制台同 loop 常驻。
+
+    与 classic 共用运维外壳；场景接线只覆盖定时/语音/家人事件，
+    `sensor.*` 由 VLA 自己消费，避免同一次跌倒双重确认。
+    """
     import uvicorn
     from sensors.camera import Camera
     from sensors.sentinel import EdgeSentinel, run_sentinel
@@ -233,6 +261,7 @@ async def _vla_serve_loop(engine: SceneEngine, log: EventLog) -> int:
     from server.app import create_app
     from server.push import PushHub
 
+    _wire_vla(engine)
     cam = Camera.from_settings()
     sentinel = EdgeSentinel.from_settings()
 
@@ -249,7 +278,10 @@ async def _vla_serve_loop(engine: SceneEngine, log: EventLog) -> int:
             break
         await asyncio.sleep(0.05)
 
+    voice_stop, voice_task, heartbeat_task = await _start_ops_tasks(log)
+
     print(f"🌐 家人端控制台：http://{host}:{port}")
+    print(f"🎙 常驻语音回路：{'已启动' if voice_task else '未启用'}")
     print("🚀 [VLA 模式] 极低功耗快慢分层架构与控制台常驻中（5fps 边缘哨兵，CPU < 1%）。Ctrl+C 退出。")
 
     stop_ev = asyncio.Event()
@@ -268,11 +300,14 @@ async def _vla_serve_loop(engine: SceneEngine, log: EventLog) -> int:
         print("\nVLA 服务退出。")
     finally:
         stop_ev.set()
+        await _stop_ops_tasks(voice_stop, voice_task, heartbeat_task)
         server.should_exit = True
         try:
             await asyncio.wait_for(asyncio.shield(server_task), timeout=3.0)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             server_task.cancel()
+        engine.unwire()
+        cam.stop()
     return 0
 
 
@@ -320,7 +355,7 @@ async def amain() -> int:
             return await _voice_loop(engine)
         if args.perceive:
             if args.mode == "vla":
-                return await _vla_perceive_loop(log)
+                return await _vla_perceive_loop(engine, log)
             return await _perceive_loop(engine)
         if args.serve:
             if args.mode == "vla":

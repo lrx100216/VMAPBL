@@ -563,8 +563,12 @@ async def dispatch_action(
             sender = str(payload.get("sender", "养老AI管家"))
             recipient = str(payload.get("recipient", "家人"))
             direction = str(payload.get("direction", "to_family"))
-            msg_id = await notify.send(msg, urgent=urgent, direction=direction, sender=sender, recipient=recipient)
-            res = {"status": "ok", "msg_id": msg_id, "urgent": urgent, "msg": msg}
+            receipt = await notify.send_with_receipt(
+                msg, urgent=urgent, direction=direction, sender=sender,
+                recipient=recipient)
+            res = {"status": "ok", "msg_id": receipt.msg_id,
+                   "delivered": receipt.delivered, "urgent": urgent,
+                   "msg": msg, "channels": receipt.channels}
 
         elif act_type == ActionType.RECORD_MEDICATION.value:
             slot = str(payload.get("slot", "morning")).lower()
@@ -674,12 +678,32 @@ async def decide_and_act(
         except Exception:
             pass
 
-    # 2. 依次派发动作
+    # 2. 依次派发动作；STOP_ALERT 只有在本次决策里至少一条家人通知送达后才生效
     action_results: list[dict[str, Any]] = []
     followup_actions: list[dict[str, Any]] = []
+    delivered_notify = False
+
+    async def _run_action(act) -> dict[str, Any]:
+        nonlocal delivered_notify
+        act_dict = act.to_dict() if hasattr(act, "to_dict") else dict(act)
+        act_type = str(act_dict.get("type", "")).strip().upper()
+        if act_type == ActionType.STOP_ALERT.value and not delivered_notify:
+            res = {"type": ActionType.STOP_ALERT.value, "status": "skipped",
+                   "reason": "本次决策没有已送达的家人通知，不武装静默"}
+            if target_log is not None:
+                try:
+                    target_log.log_event("vla_agent", "action",
+                                         {"action": act_dict, "result": res})
+                except Exception:
+                    pass
+            return res
+        res = await dispatch_action(act_dict, state=target_state, log=target_log)
+        if act_type == ActionType.NOTIFY_FAMILY.value and res.get("delivered"):
+            delivered_notify = True
+        return res
 
     for act in decision.get("actions", []):
-        res = await dispatch_action(act, state=target_state, log=target_log)
+        res = await _run_action(act)
         action_results.append(res)
 
         # 闭环检查：若动作是带有语音收听的安全二次问询（例如突发静止/跌倒筛查）
@@ -724,10 +748,11 @@ async def decide_and_act(
                 }
                 followup_actions.extend([alert_act, silence_act])
 
-    # 执行闭环衍生动作
+    # 执行闭环衍生动作；被跳过的 STOP_ALERT 不写进决策动作列表
     for act in followup_actions:
-        decision.setdefault("actions", []).append(act)
-        res = await dispatch_action(act, state=target_state, log=target_log)
+        res = await _run_action(act)
+        if res.get("status") != "skipped":
+            decision.setdefault("actions", []).append(act)
         action_results.append(res)
 
     decision["action_results"] = action_results

@@ -330,3 +330,10 @@ python tools/install_launchd.py
 `logs/butler.log`（10MB × 5 轮转），stdout/stderr 另由 launchd 写入
 `logs/butler.out.log` 与 `logs/butler.err.log`。
 
+**VLA 模式对齐**。`python main.py --mode vla --serve` 现在与 classic 共用同一套
+运维外壳：常驻语音回路、心跳/看门狗、定时吃药/起床、语音指令、家人留言与状态询问
+全部接通。`sensor.*` 事件只由 VLA 消费，不再接场景，避免同一次跌倒双重确认/双重告警。
+VLA 的 `NOTIFY_FAMILY` 改为等待平台送达回执，只有确认送达后才执行 `STOP_ALERT`
+静默；未送达时保持后续再次告警的机会。VLA 仍需要摄像头、麦克风、通知渠道和外网
+视觉模型，但不需要门口/床区 ROI 标定，也不需要自训药盒检测器。
+

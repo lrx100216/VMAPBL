@@ -301,16 +301,21 @@ class SceneEngine:
         bus.subscribe("state.*", _on_state)
         self._bus_handlers.append(("state.*", _on_state))
 
-    def wire_event_triggers(self) -> None:
+    def wire_event_triggers(self, skip_prefixes: tuple[str, ...] = ()) -> None:
         """M5 接线：按 YAML 的 event 名订阅总线（如 sensor.still）。
 
         不同名的事件通道合并成一条订阅（fnmatch 语义无重叠时逐一比对）。
+        skip_prefixes：VLA 模式跳过 `sensor.*`——这些事件由 VLA 自己消费，
+        再接场景会变成同一次跌倒双重确认/双重告警。
         """
         by_event: dict[str, list[str]] = {}
         for s in self._scenes.values():
             for t in s.trigger:
                 if t.get("type") == "event":
-                    by_event.setdefault(str(t["event"]), []).append(s.id)
+                    name = str(t["event"])
+                    if any(name.startswith(p) for p in skip_prefixes):
+                        continue
+                    by_event.setdefault(name, []).append(s.id)
         for etype, scene_ids in by_event.items():
             async def _on_bus(event: dict, ids=list(scene_ids),
                               et=etype) -> None:
