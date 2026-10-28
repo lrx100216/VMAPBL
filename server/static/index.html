@@ -1,532 +1,437 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>本地 AI 管家 · 家人端</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>家庭守护仪表盘</title>
 <style>
-  :root {
-    --bg: #faf7f2;
-    --card: #ffffff;
-    --ink: #3a342e;
-    --muted: #8a8178;
-    --line: #e8e0d6;
-    --accent: #c0793a;
-    --accent-soft: #f3e4d3;
-    --family: #2f7d5d;
-    --family-soft: #e2efe7;
-    --elder: #3a6ea5;
-    --elder-soft: #e3edf6;
-    --alert: #c0392b;
-    --ok: #2f7d5d;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 0;
-    background: var(--bg); color: var(--ink);
-    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue",
-                 "Microsoft YaHei", sans-serif;
-    font-size: 16px; line-height: 1.5;
-    padding: env(safe-area-inset-top) env(safe-area-inset-right)
-             env(safe-area-inset-bottom) env(safe-area-inset-left);
-  }
-  header {
-    display: flex; align-items: center; gap: 12px;
-    padding: 14px 18px; background: var(--card); border-bottom: 1px solid var(--line);
-    position: sticky; top: 0; z-index: 5;
-  }
-  header h1 { font-size: 20px; margin: 0; font-weight: 700; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: #bbb; flex: none; }
-  .dot.on { background: var(--ok); box-shadow: 0 0 0 3px #2f7d5d22; }
-  .dot.off { background: var(--alert); }
-  .conn-label { color: var(--muted); font-size: 13px; }
-  main { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; padding: 16px 18px; max-width: 1100px; margin: 0 auto; }
-  @media (max-width: 820px) { main { grid-template-columns: 1fr; } }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
-  .card h2 { margin: 0 0 10px; font-size: 15px; color: var(--muted); font-weight: 600; letter-spacing: .05em; }
-
-  /* 消息流 */
-  .msgs { height: 58vh; min-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
-  .msg { max-width: 78%; padding: 10px 14px; border-radius: 14px; font-size: 16px; white-space: pre-wrap; word-break: break-word; }
-  .msg .meta { display: block; font-size: 12px; color: var(--muted); margin-top: 4px; }
-  .msg.family { align-self: flex-end; background: var(--family-soft); color: var(--family); border-bottom-right-radius: 4px; }
-  .msg.elder { align-self: flex-start; background: var(--elder-soft); color: var(--elder); border-bottom-left-radius: 4px; }
-  .msg.urgent { outline: 2px solid var(--alert); outline-offset: 1px; }
-  .empty { color: var(--muted); text-align: center; padding: 30px 0; }
-  .send-row { display: flex; gap: 8px; margin-top: 10px; }
-  .send-row input { flex: 1; padding: 11px 13px; font-size: 16px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
-  .send-row input:focus { outline: 2px solid var(--accent-soft); }
-
-  /* 状态面板 */
-  .stat-row { display: flex; justify-content: space-between; align-items: center; padding: 9px 2px; border-bottom: 1px dashed var(--line); font-size: 15px; }
-  .stat-row:last-child { border-bottom: none; }
-  .stat-row .k { color: var(--muted); }
-  .stat-row .v { font-weight: 600; }
-  .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 600; }
-  .pill.ok { background: var(--ok); color: #fff; }
-  .pill.wait { background: var(--accent-soft); color: var(--accent); }
-  .meds { display: flex; gap: 8px; margin-top: 6px; }
-  .med { flex: 1; text-align: center; padding: 8px 4px; border-radius: 10px; background: #f4efe8; color: var(--muted); font-size: 14px; }
-  .med.done { background: var(--family-soft); color: var(--family); font-weight: 700; }
-
-  /* 缩略图与 ROI 画布 */
-  .frame-box { width: 100%; aspect-ratio: 16/9; background: #e9e2d8; border-radius: 10px; overflow: hidden; position: relative; user-select: none; }
-  .frame-box img { width: 100%; height: 100%; object-fit: fill; display: block; }
-  .frame-box canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-  .frame-box canvas.drawing { pointer-events: auto; cursor: crosshair; }
-  .frame-box .cap { position: absolute; left: 8px; bottom: 8px; background: #0008; color: #fff; font-size: 12px; padding: 2px 8px; border-radius: 6px; pointer-events: none; }
-  .roi-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px; font-size: 13px; }
-  .roi-bar select { padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: #fff; font-size: 13px; color: var(--ink); font-weight: 600; }
-  .btn.sm { padding: 6px 11px; font-size: 13px; border-radius: 8px; }
-  .roi-hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
-
-  /* 触发按钮 */
-  .triggers { display: flex; flex-wrap: wrap; gap: 8px; }
-  .btn {
-    padding: 10px 16px; font-size: 15px; font-weight: 600; cursor: pointer;
-    border: 1px solid var(--line); background: #fff; color: var(--ink);
-    border-radius: 10px; transition: background .15s, transform .05s;
-  }
-  .btn:hover { background: var(--accent-soft); }
-  .btn:active { transform: scale(.97); }
-  .btn.accent { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .btn.accent:hover { background: #a9662f; }
-
-  /* toast */
-  #toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); background: #3a342e; color: #fff; padding: 10px 18px; border-radius: 10px; font-size: 14px; opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 20; max-width: 84vw; }
-  #toast.show { opacity: 1; }
+:root{
+  --bg:#f4f6f8; --card:#fff; --line:#e6e9ed; --text:#1d2733; --muted:#6b7785;
+  --green:#1f9d6b; --green-bg:#e7f6ef; --amber:#a9700a; --amber-bg:#fff4dd;
+  --blue:#2f6fed; --blue-bg:#e9effd; --shadow:0 1px 3px rgba(20,30,40,.06);
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text);font-size:16px}
+.topbar{position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:14px 22px;flex-wrap:wrap;gap:10px}
+.brand{font-weight:700;font-size:19px;display:flex;align-items:center;gap:10px}
+.badge{font-size:12px;font-weight:500;color:var(--muted);border:1px solid var(--line);border-radius:20px;padding:3px 9px;background:#fafbfc}
+.tabs{display:flex;gap:6px}
+.tab{border:1px solid var(--line);background:#fff;border-radius:22px;padding:8px 18px;font-size:15px;cursor:pointer;color:var(--muted);text-decoration:none}
+.tab.active{background:var(--blue-bg);color:var(--blue);border-color:#c9d9fb}
+main{max-width:1180px;margin:0 auto;padding:22px}
+.page{display:none}.page.active{display:block}
+.elder-card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px 22px;box-shadow:var(--shadow)}
+.greet{color:var(--muted);font-size:14px;margin-bottom:14px}
+.elder{display:flex;align-items:center;gap:16px}
+.avatar{width:64px;height:64px;border-radius:50%;background:var(--blue-bg);color:var(--blue);display:flex;align-items:center;justify-content:center;font-size:30px;font-weight:700}
+h1{font-size:22px;margin:0 0 8px}.age{font-size:14px;color:var(--muted);font-weight:400;margin-left:8px}
+.status-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.pill{border-radius:20px;padding:4px 12px;font-size:13px;font-weight:600}
+.pill.ok{background:var(--green-bg);color:var(--green)}
+.pill.calm{background:var(--blue-bg);color:var(--blue)}
+.pill.warn{background:var(--amber-bg);color:var(--amber)}
+.muted{color:var(--muted);font-size:13px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin-top:18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px 20px;box-shadow:var(--shadow)}
+.card h2,.panel h2{font-size:16px;margin:0 0 14px;display:flex;align-items:center;gap:8px}
+.metric{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px dashed var(--line);font-size:15px}
+.metric:last-child{border-bottom:0}
+.metric b{font-weight:600}
+.metric .big{font-size:22px;font-weight:700}
+.warn-text{color:var(--amber);background:var(--amber-bg);border-radius:10px;padding:10px 12px;margin-top:10px;font-size:14px}
+.ok-text{color:var(--green)}
+.progress{height:9px;background:#eef1f4;border-radius:6px;overflow:hidden;margin:10px 0 4px}
+.progress i{display:block;height:100%;background:var(--green)}
+.device{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px dashed var(--line)}
+.device:last-child{border-bottom:0}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-right:8px}
+.dot.off{background:#d59a17}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px 20px;margin-top:18px;box-shadow:var(--shadow)}
+#timeline{list-style:none;margin:0;padding:0}
+.event{border-bottom:1px solid var(--line)}
+.event:last-child{border-bottom:0}
+.event-head{width:100%;background:none;border:0;text-align:left;display:flex;align-items:center;gap:14px;padding:13px 4px;cursor:pointer;font-size:15px;color:var(--text)}
+.event-head:hover{background:#fafbfc}
+.event-time{color:var(--muted);font-variant-numeric:tabular-nums;width:52px;flex:none}
+.event-title{flex:1}
+.event-detail{display:none;color:var(--muted);font-size:14px;line-height:1.7;padding:0 4px 14px 66px}
+.event.open .event-detail{display:block}
+.event-chevron{color:var(--muted);font-size:12px}
+.quick{position:sticky;bottom:0;background:linear-gradient(180deg,rgba(244,246,248,.2),var(--bg) 30%);display:flex;gap:12px;padding:18px 0 6px;margin-top:8px}
+.btn{border:1px solid var(--line);background:#fff;border-radius:12px;padding:12px 20px;font-size:15px;cursor:pointer;color:var(--text)}
+.btn.primary{background:var(--blue);border-color:var(--blue);color:#fff}
+.btn.ghost{background:#fff}
+.btn.small{padding:7px 14px;font-size:14px}
+.btn:hover{filter:brightness(.97)}
+.switch{position:relative;width:46px;height:26px;flex:none}
+.switch input{display:none}
+.switch i{position:absolute;inset:0;background:#cfd6dd;border-radius:20px;transition:.15s;cursor:pointer}
+.switch i:before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.15s}
+.switch input:checked+i{background:var(--green)}
+.switch input:checked+i:before{transform:translateX(20px)}
+.rule{display:flex;align-items:center;gap:16px;padding:16px 4px;border-bottom:1px solid var(--line)}
+.rule:last-child{border-bottom:0}
+.rule-info{flex:1;cursor:pointer}
+.rule-name{font-weight:600;margin-bottom:5px}
+.rule-trigger{color:var(--muted);font-size:14px}
+.field{margin:14px 0}
+.field label{display:block;font-size:14px;color:var(--muted);margin-bottom:7px}
+textarea,input[type=text],input[type=number],select{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;font-family:inherit;background:#fff;color:var(--text)}
+textarea{min-height:74px;resize:vertical}
+.seg{display:flex;gap:8px;flex-wrap:wrap}
+.seg .btn.on{background:var(--blue-bg);color:var(--blue);border-color:#c9d9fb}
+.steps{color:var(--muted);font-size:14px;margin-top:8px}
+input[type=range]{width:100%}
+.modal{position:fixed;inset:0;background:rgba(15,23,32,.45);display:flex;align-items:center;justify-content:center;padding:20px;z-index:50}
+.modal.hidden{display:none}
+.sheet{background:#fff;border-radius:16px;max-width:560px;width:100%;max-height:88vh;overflow:auto;padding:22px}
+.sheet h3{margin:0 0 6px;font-size:19px}
+.sheet-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
+.drug{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px dashed var(--line);font-size:14px}
+#toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:#1d2733;color:#fff;padding:12px 22px;border-radius:24px;font-size:15px;opacity:0;pointer-events:none;transition:.2s;z-index:99}
+#toast.show{opacity:1}
+.privacy{font-size:12px;color:var(--muted);margin-top:12px}
 </style>
 </head>
 <body>
-<header>
-  <span class="dot" id="dot"></span>
-  <h1>本地 AI 管家 · 家人端</h1>
-  <span class="conn-label" id="connLabel">连接中…</span>
+<header class="topbar">
+  <div class="brand">家庭守护仪表盘 <span class="badge">演示数据</span></div>
+  <nav class="tabs">
+    <button class="tab active" data-page="dashboard">仪表盘</button>
+    <button class="tab" data-page="reminders">智能提醒</button>
+    <a class="tab" href="/debug">设备调试</a>
+  </nav>
 </header>
 
 <main>
-  <section class="card">
-    <h2>与老人的对话</h2>
-    <div class="msgs" id="msgs">
-      <div class="empty">正在加载消息…</div>
+  <!-- ② 首页仪表盘 -->
+  <section id="dashboard" class="page active">
+    <div class="elder-card">
+      <div class="greet">下午好，今天是 <span id="today"></span> · 已绑定 1 位老人</div>
+      <div class="elder">
+        <div class="avatar" aria-hidden="true">王</div>
+        <div>
+          <h1>王奶奶 <span class="age">85 岁 · 独居</span></h1>
+          <div class="status-row">
+            <span class="pill ok" id="presence">● 在家</span>
+            <span class="pill calm">状态良好</span>
+            <span class="muted">更新于 2 分钟前</span>
+          </div>
+        </div>
+      </div>
+      <div class="privacy">隐私设计：无画面、只有结论。本页不请求摄像头画面，也不展示实时视频。</div>
     </div>
-    <div class="send-row">
-      <input id="msgInput" type="text" maxlength="200" placeholder="给老人留个言，会通过音箱播报出来…">
-      <button class="btn accent" id="sendBtn">发送</button>
+
+    <div class="cards">
+      <article class="card">
+        <h2>① 今日安全摘要</h2>
+        <div class="metric"><span>起床时间</span><b>07:12</b></div>
+        <div class="metric"><span>活动时长</span><b>4 小时 20 分</b></div>
+        <div class="metric"><span>异常情况</span><b class="ok-text">无异常</b></div>
+      </article>
+
+      <article class="card">
+        <h2>② 用药状态</h2>
+        <div class="metric"><span>今日已确认</span><b class="big">2 / 3 次</b></div>
+        <div class="progress" aria-label="今日服药进度"><i style="width:66%"></i></div>
+        <div class="muted">08:00 已确认 · 13:00 已确认 · 19:00 待确认</div>
+        <div class="warn-text">⚠ 19:00 还有一次未确认，若持续未确认将按升级流程通知家人。</div>
+      </article>
+
+      <article class="card">
+        <h2>③ 设备状态</h2>
+        <div class="device"><span><i class="dot"></i>摄像头</span><b>1 / 1 在线</b></div>
+        <div class="device"><span><i class="dot"></i>音箱</span><b>1 / 1 在线</b></div>
+        <div class="device"><span><i class="dot off"></i>传感器</span><b>2 / 3 在线</b></div>
+      </article>
+    </div>
+
+    <section class="panel">
+      <h2>事件时间线</h2>
+      <ul id="timeline"></ul>
+    </section>
+
+    <div class="quick">
+      <button class="btn primary" id="voiceBtn">🎙 发语音</button>
+      <button class="btn" id="videoBtn">📞 视频通话</button>
+      <button class="btn ghost" id="calmBtn">💚 一键安抚</button>
     </div>
   </section>
 
-  <section style="display:flex; flex-direction:column; gap:16px;">
-    <div class="card">
-      <h2>当前画面 · 区域标定 (ROI)</h2>
-      <div class="frame-box" id="frameBox">
-        <img id="frame" alt="当前画面">
-        <canvas id="roiCanvas"></canvas>
-        <span class="cap" id="frameCap">…</span>
-      </div>
-      <div class="roi-bar">
-        <select id="roiSelect" title="选择要标定的区域">
-          <option value="door_inside">门内区 (door_inside)</option>
-          <option value="door_outside">门外区 (door_outside)</option>
-          <option value="bed">床/休息区 (bed)</option>
-        </select>
-        <button class="btn sm" id="roiDrawBtn">✏️ 手动画点</button>
-        <button class="btn sm accent" id="roiSaveBtn" style="display:none;">💾 保存多边形</button>
-        <button class="btn sm" id="roiCancelBtn" style="display:none;">取消</button>
-        <button class="btn sm" id="roiClearBtn" title="清除当前选中区域的多边形">🗑️ 清空该区</button>
-        <button class="btn sm" id="roiAutoBtn" title="使用视觉大模型自动标定门内、门外、床区">✨ AI 自动标定</button>
-      </div>
-      <div class="roi-hint" id="roiHint">已标定多边形会自动叠加显示在画面上；支持手动画点或 AI 一键标定（热生效，无需重启）。</div>
-    </div>
-
-    <div class="card">
-      <h2>老人状态</h2>
-      <div class="stat-row"><span class="k">画面有人</span><span class="v" id="v-occupancy">—</span></div>
-      <div class="stat-row"><span class="k">最后活动</span><span class="v" id="v-lastmotion">—</span></div>
-      <div class="stat-row"><span class="k">已持续静止</span><span class="v" id="v-still">—</span></div>
-      <div class="stat-row"><span class="k">正在播报</span><span class="v" id="v-speaking">—</span></div>
-      <div class="stat-row"><span class="k">今日吃药</span><span class="v" id="v-meds" style="display:block; width:100%;"></span></div>
-    </div>
-
-    <div class="card">
-      <h2>手动触发场景（调试）</h2>
-      <div class="triggers" id="triggers"><span class="empty">正在加载…</span></div>
-    </div>
+  <!-- ⑤ 场景化提醒管理 -->
+  <section id="reminders" class="page">
+    <section class="panel">
+      <h2>智能提醒</h2>
+      <div class="muted" style="margin-bottom:8px">点击规则名称进入详情；右侧开关控制该规则是否生效。</div>
+      <div id="ruleList"></div>
+    </section>
+    <section class="panel">
+      <h2>药品管理</h2>
+      <div class="muted" style="margin-bottom:12px">拍照识别药盒添加药品，设置余量与提前补药提醒。</div>
+      <button class="btn primary" id="openDrugs">进入药品管理</button>
+    </section>
   </section>
 </main>
 
-<div id="toast"></div>
+<!-- 规则详情 -->
+<div id="ruleModal" class="modal hidden" role="dialog" aria-modal="true">
+  <div class="sheet">
+    <h3 id="ruleTitle">规则详情</h3>
+    <div class="muted" id="ruleTrigger"></div>
+    <div class="field">
+      <label>提醒话术（音箱播报内容）</label>
+      <textarea id="rulePhrase"></textarea>
+    </div>
+    <div class="field">
+      <label>方言语音</label>
+      <div class="seg">
+        <button class="btn small" id="dialectBtn">🎙 录制方言话术</button>
+        <span class="muted" id="dialectState" style="align-self:center">未录制（使用普通话合成）</span>
+      </div>
+    </div>
+    <div class="field">
+      <label>AI 确认方式</label>
+      <div class="seg" id="aiModes">
+        <button class="btn small" data-mode="vision">视觉确认</button>
+        <button class="btn small" data-mode="time">仅时间提醒</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>漏服升级流程</label>
+      <input type="range" id="upgradeRange" min="0" max="3" step="1" value="3">
+      <div class="steps" id="upgradeText"></div>
+    </div>
+    <div class="field">
+      <label>升级步长（分钟）</label>
+      <select id="upgradeStep">
+        <option value="5">5</option>
+        <option value="10">10</option>
+        <option value="15" selected>15</option>
+        <option value="30">30</option>
+      </select>
+    </div>
+    <div class="sheet-actions">
+      <button class="btn" data-close>取消</button>
+      <button class="btn primary" id="saveRule">保存规则</button>
+    </div>
+  </div>
+</div>
+
+<!-- 药品管理 -->
+<div id="drugModal" class="modal hidden" role="dialog" aria-modal="true">
+  <div class="sheet">
+    <h3>药品管理</h3>
+    <div class="muted">余量不足时按“提前补药天数”提醒家人。</div>
+    <div id="drugList" style="margin-top:12px"></div>
+    <div class="field">
+      <label>药品名称</label>
+      <div class="seg">
+        <input type="text" id="drugName" placeholder="例如：阿托伐他汀钙片" style="flex:1">
+        <button class="btn small" id="scanDrug">📷 拍照识别药盒</button>
+      </div>
+    </div>
+    <div class="field"><label>余量（片）</label><input type="number" id="drugStock" value="20" min="0"></div>
+    <div class="field"><label>提前补药提醒（天）</label><input type="number" id="drugDays" value="3" min="1"></div>
+    <div class="sheet-actions">
+      <button class="btn" data-close>关闭</button>
+      <button class="btn primary" id="addDrug">添加药品</button>
+    </div>
+  </div>
+</div>
+
+<!-- 发语音 -->
+<div id="voiceModal" class="modal hidden" role="dialog" aria-modal="true">
+  <div class="sheet">
+    <h3>给王奶奶发语音</h3>
+    <div class="muted">文字将转为语音在老人端音箱播报（演示，不真实发送）。</div>
+    <div class="field"><textarea id="voiceText" placeholder="例如：妈，晚上我过去吃饭，您别做太多菜。"></textarea></div>
+    <div class="sheet-actions">
+      <button class="btn" data-close>取消</button>
+      <button class="btn primary" id="sendVoice">发送</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" role="status"></div>
 
 <script>
-"use strict";
-const $ = (id) => document.getElementById(id);
-let ws = null, reconnectDelay = 1000;
-
 /* ---------- 工具 ---------- */
-function fmtTime(ts) {
-  if (!ts) return "暂无记录";
-  const d = new Date(ts * 1000);
-  if (isNaN(d.getTime())) return "—";
-  const p = (n) => String(n).padStart(2, "0");
-  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
+const $ = (id) => document.getElementById(id);
 function toast(msg) {
   const t = $("toast");
   t.textContent = msg;
   t.classList.add("show");
-  clearTimeout(toast._h);
-  toast._h = setTimeout(() => t.classList.remove("show"), 2600);
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove("show"), 2600);
 }
-function escState(html) { /* 纯展示用状态值不走 HTML，统一 textContent */ return html; }
-
-/* ---------- 状态面板 ---------- */
-const MEDS = [["morning", "早"], ["noon", "中"], ["evening", "晚"]];
-function renderState(s) {
-  const pill = (cond, onTxt, offTxt) => cond
-    ? `<span class="pill ok">${onTxt}</span>` : `<span class="pill wait">${offTxt}</span>`;
-  $("v-occupancy").innerHTML = pill(s.occupancy, "有人", "无人");
-  $("v-lastmotion").textContent = fmtTime(s.last_motion_ts);
-  $("v-still").innerHTML = pill(s.is_still, "已静止", "活动中");
-  $("v-speaking").innerHTML = pill(s.speaking, "播报中", "空闲");
-  const meds = (s.medication_taken || {});
-  $("v-meds").innerHTML = "";
-  const wrap = $("v-meds");
-  MEDS.forEach(([slot, label]) => {
-    const d = document.createElement("span");
-    d.className = "med" + (meds[slot] ? " done" : "");
-    d.textContent = label + (meds[slot] ? " 已吃" : " 未吃");
-    wrap.appendChild(d);
-  });
-}
-
-/* ---------- 消息流 ---------- */
-function addMessage(m, prepend) {
-  const box = $("msgs");
-  const empty = box.querySelector(".empty");
-  if (empty) empty.remove();
-  const div = document.createElement("div");
-  const isFamily = m.direction === "to_family";
-  div.className = "msg " + (isFamily ? "family" : "elder") + (m.urgent ? " urgent" : "");
-  const label = isFamily
-    ? `${m.sender || "老人"} → ${m.recipient || "家人"}`
-    : `${m.sender || "家人"} → ${m.recipient || "老人"}`;
-  div.textContent = m.text;
-  const meta = document.createElement("span");
-  meta.className = "meta";
-  meta.textContent = `${label} · ${fmtTime(m.ts)}`;
-  div.appendChild(meta);
-  if (prepend) box.prepend(div);
-  else box.appendChild(div);
-  if (!prepend) box.scrollTop = box.scrollHeight;
-}
-
-/* ---------- 鉴权 ---------- */
-const AUTH_TOKEN = new URLSearchParams(location.search).get("token")
-  || sessionStorage.getItem("BUTLER_TOKEN") || "";
-function authHeaders(extra) {
-  return AUTH_TOKEN ? { ...extra, Authorization: `Bearer ${AUTH_TOKEN}` } : extra;
-}
-function requireAuth() {
-  const t = prompt("请输入家人端访问口令（BUTLER_TOKEN）");
-  if (t) { sessionStorage.setItem("BUTLER_TOKEN", t.trim()); location.reload(); }
-}
-
-/* ---------- REST ---------- */
-async function getJSON(url) {
-  const r = await fetch(url, { headers: authHeaders({}) });
-  if (r.status === 401) { requireAuth(); throw new Error("未授权"); }
-  if (!r.ok) throw new Error(`${url} → ${r.status}`);
-  return r.json();
-}
-async function postJSON(url, body) {
-  const r = await fetch(url, {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: body ? JSON.stringify(body) : "{}",
-  });
-  if (r.status === 401) { requireAuth(); throw new Error("未授权"); }
-  if (!r.ok) {
-    const t = await r.text().catch(() => "");
-    throw new Error(`${r.status} ${t}`);
-  }
-  return r.json();
-}
-async function deleteJSON(url) {
-  const r = await fetch(url, { method: "DELETE", headers: authHeaders({}) });
-  if (r.status === 401) { requireAuth(); throw new Error("未授权"); }
-  if (!r.ok) throw new Error(`${url} → ${r.status}`);
-  return r.json();
-}
-
-async function loadState() { try { renderState(await getJSON("/api/state")); } catch (e) { toast("状态加载失败"); } }
-async function loadMessages() {
-  try {
-    const msgs = await getJSON("/api/messages?limit=30");
-    $("msgs").innerHTML = msgs.length
-      ? "" : `<div class="empty">还没有消息</div>`;
-    msgs.slice().reverse().forEach((m) => addMessage(m, false));
-  } catch (e) { toast("消息加载失败"); }
-}
-async function loadScenes() {
-  try {
-    const scenes = await getJSON("/api/scenes");
-    const wrap = $("triggers");
-    wrap.innerHTML = "";
-    scenes.forEach((s) => {
-      const b = document.createElement("button");
-      b.className = "btn";
-      b.textContent = `${s.name}`;
-      b.title = `手动触发 ${s.id}`;
-      b.onclick = async () => {
-        b.disabled = true;
-        try {
-          const r = await postJSON(`/api/trigger/${encodeURIComponent(s.id)}`);
-          toast(r.ran ? "已执行 ✅" : "被拦截 ❌（冷却/条件/重入）");
-        } catch (e) { toast("触发失败：后端异常"); }
-        b.disabled = false;
-      };
-      wrap.appendChild(b);
-    });
-  } catch (e) { toast("场景加载失败"); }
-}
-
-/* ---------- 缩略图轮询 & ROI 交互画布 ---------- */
-let frameTimer = null;
-let frameBusy = false;
-let frameOrigW = 1280, frameOrigH = 720;
-let savedRois = {};
-let drawingRoi = false;
-let draftPts = []; // 存原始相机像素坐标 [[x, y], ...]
-
-const ROI_COLORS = {
-  door_inside:  { stroke: "#2ecc71", fill: "rgba(46, 204, 113, 0.22)", label: "门内" },
-  door_outside: { stroke: "#e67e22", fill: "rgba(230, 126, 34, 0.22)", label: "门外" },
-  bed:          { stroke: "#3498db", fill: "rgba(52, 152, 219, 0.22)", label: "床区" },
-};
-
-function renderRoiCanvas() {
-  const cvs = $("roiCanvas");
-  const box = $("frameBox");
-  const rect = box.getBoundingClientRect();
-  if (!rect.width || !rect.height) return;
-  if (cvs.width !== Math.round(rect.width) || cvs.height !== Math.round(rect.height)) {
-    cvs.width = Math.round(rect.width);
-    cvs.height = Math.round(rect.height);
-  }
-  const ctx = cvs.getContext("2d");
-  ctx.clearRect(0, 0, cvs.width, cvs.height);
-  const sx = cvs.width / (frameOrigW || 1280);
-  const sy = cvs.height / (frameOrigH || 720);
-
-  // 画已保存的多边形
-  Object.entries(savedRois).forEach(([name, pts]) => {
-    if (!Array.isArray(pts) || pts.length < 3) return;
-    if (drawingRoi && name === $("roiSelect").value && draftPts.length > 0) return;
-    const style = ROI_COLORS[name] || { stroke: "#9b59b6", fill: "rgba(155,89,182,0.2)", label: name };
-    ctx.beginPath();
-    pts.forEach(([x, y], idx) => {
-      const cx = x * sx, cy = y * sy;
-      if (idx === 0) ctx.moveTo(cx, cy);
-      else ctx.lineTo(cx, cy);
-    });
-    ctx.closePath();
-    ctx.fillStyle = style.fill;
-    ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = style.stroke;
-    ctx.stroke();
-    // 标签
-    const [fx, fy] = pts[0];
-    ctx.font = "bold 12px sans-serif";
-    ctx.fillStyle = style.stroke;
-    ctx.fillText(style.label, Math.max(4, fx * sx + 4), Math.max(14, fy * sy + 14));
-  });
-
-  // 画正在手绘的多边形草稿
-  if (drawingRoi && draftPts.length > 0) {
-    ctx.beginPath();
-    draftPts.forEach(([x, y], idx) => {
-      const cx = x * sx, cy = y * sy;
-      if (idx === 0) ctx.moveTo(cx, cy);
-      else ctx.lineTo(cx, cy);
-    });
-    if (draftPts.length >= 3) {
-      ctx.closePath();
-      ctx.fillStyle = "rgba(231, 76, 60, 0.25)";
-      ctx.fill();
-    }
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = "#e74c3c";
-    ctx.stroke();
-    draftPts.forEach(([x, y]) => {
-      ctx.beginPath();
-      ctx.arc(x * sx, y * sy, 4, 0, Math.PI * 2);
-      ctx.fillStyle = "#e74c3c";
-      ctx.fill();
-    });
-  }
-}
-
-async function loadRois() {
-  try {
-    const r = await getJSON("/api/roi");
-    if (r.ok) {
-      savedRois = r.roi || {};
-      renderRoiCanvas();
-    }
-  } catch (e) { /* 静默 */ }
-}
-
-function setDrawingMode(on) {
-  drawingRoi = on;
-  draftPts = [];
-  const cvs = $("roiCanvas");
-  cvs.classList.toggle("drawing", on);
-  $("roiDrawBtn").style.display = on ? "none" : "";
-  $("roiSaveBtn").style.display = on ? "" : "none";
-  $("roiCancelBtn").style.display = on ? "" : "none";
-  $("roiHint").textContent = on
-    ? `正在标定「${$("roiSelect").value}」：在画面上左键点击添加顶点（至少 3 个），点「保存多边形」生效。`
-    : "已标定多边形会自动叠加显示在画面上；支持手动画点或 AI 一键标定（热生效，无需重启）。";
-  renderRoiCanvas();
-}
-
-$("roiDrawBtn").onclick = () => setDrawingMode(true);
-$("roiCancelBtn").onclick = () => setDrawingMode(false);
-$("roiCanvas").addEventListener("click", (e) => {
-  if (!drawingRoi) return;
-  const rect = $("roiCanvas").getBoundingClientRect();
-  const x = Math.round(((e.clientX - rect.left) / rect.width) * frameOrigW);
-  const y = Math.round(((e.clientY - rect.top) / rect.height) * frameOrigH);
-  draftPts.push([x, y]);
-  $("roiHint").textContent = `已添加 ${draftPts.length} 个顶点 ${draftPts.length >= 3 ? "（可点击保存）" : "（还需至少 " + (3 - draftPts.length) + " 个点）"}`;
-  renderRoiCanvas();
+$("today").textContent = new Date().toLocaleDateString("zh-CN", {
+  year: "numeric", month: "long", day: "numeric", weekday: "long"
 });
 
-$("roiSaveBtn").onclick = async () => {
-  const name = $("roiSelect").value;
-  if (draftPts.length < 3) {
-    toast("请至少在画面上点击 3 个顶点");
-    return;
-  }
-  try {
-    const r = await postJSON(`/api/roi/${encodeURIComponent(name)}`, { points: draftPts });
-    savedRois = r.roi || {};
-    setDrawingMode(false);
-    toast(`已保存「${name}」多边形并实时生效 ✅`);
-  } catch (e) {
-    toast("保存 ROI 失败");
-  }
-};
+/* ---------- 页签 ---------- */
+document.querySelectorAll(".tab[data-page]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab[data-page]").forEach(b => b.classList.toggle("active", b === btn));
+    document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.id === btn.dataset.page));
+  });
+});
+document.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", () => {
+  b.closest(".modal").classList.add("hidden");
+}));
 
-$("roiClearBtn").onclick = async () => {
-  const name = $("roiSelect").value;
-  try {
-    const r = await deleteJSON(`/api/roi/${encodeURIComponent(name)}`);
-    savedRois = r.roi || {};
-    setDrawingMode(false);
-    toast(`已清空「${name}」区域`);
-  } catch (e) {
-    toast("清空 ROI 失败");
-  }
-};
+/* ---------- 事件时间线（mock，倒序） ---------- */
+const events = [
+  { time: "14:05", icon: "🚶", title: "起身活动，状态平稳",
+    detail: "AI 结论：老人从沙发起身并在客厅活动 3 分钟，步态平稳，无需家人介入。仅保留结论，不保存画面。" },
+  { time: "12:00", icon: "⚠️", title: "吃药待确认",
+    detail: "12:00 第三次用药提醒已播报，尚未获得视觉确认。当前处于 T+0 阶段，15 分钟后将再次提醒。" },
+  { time: "09:30", icon: "🔑", title: "出门提醒带钥匙",
+    detail: "检测到开门且老人穿戴整齐，音箱已播报「带钥匙了吗」。老人回应「带了」，未通知家人。" },
+  { time: "07:12", icon: "✅", title: "已起床",
+    detail: "07:12 检测到老人离床活动，作息正常。08:30 作息守护规则未触发家人通知。" },
+];
+$("timeline").innerHTML = events.map((e, i) => `
+  <li class="event" data-i="${i}">
+    <button class="event-head">
+      <span class="event-time">${e.time}</span>
+      <span class="event-title">${e.icon} ${e.title}</span>
+      <span class="event-chevron">详情 ▾</span>
+    </button>
+    <div class="event-detail">${e.detail}</div>
+  </li>`).join("");
+document.querySelectorAll(".event-head").forEach(btn => {
+  btn.addEventListener("click", () => btn.closest(".event").classList.toggle("open"));
+});
 
-$("roiAutoBtn").onclick = async () => {
-  const btn = $("roiAutoBtn");
-  btn.disabled = true;
-  btn.textContent = "⏳ AI 识别中…";
-  try {
-    const r = await postJSON("/api/roi_auto", {});
-    savedRois = r.roi || {};
-    setDrawingMode(false);
-    renderRoiCanvas();
-    toast("AI 自动标定完成，已实时生效 ✨");
-  } catch (e) {
-    toast("AI 自动标定失败（请检查画面或网络）");
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "✨ AI 自动标定";
-  }
-};
+/* ---------- 快捷操作（mock） ---------- */
+$("voiceBtn").addEventListener("click", () => $("voiceModal").classList.remove("hidden"));
+$("sendVoice").addEventListener("click", () => {
+  const text = $("voiceText").value.trim();
+  if (!text) { toast("先写一句要对老人说的话"); return; }
+  $("voiceModal").classList.add("hidden");
+  $("voiceText").value = "";
+  toast("语音已发送，老人端将播报（演示）");
+});
+$("videoBtn").addEventListener("click", () => toast("视频通话邀请已发出（演示）"));
+$("calmBtn").addEventListener("click", () => toast("已自动播报：我很好，别担心"));
 
-window.addEventListener("resize", renderRoiCanvas);
+/* ---------- 提醒规则（mock） ---------- */
+const rules = [
+  { id: "keys", name: "出门带钥匙", enabled: true, ai: "vision",
+    trigger: "检测到开门且老人穿戴整齐 → 音箱播报",
+    phrase: "带钥匙了吗？外面注意安全。" },
+  { id: "med", name: "智能吃药", enabled: true, ai: "vision",
+    trigger: "08:00 / 13:00 / 19:00，AI 视觉确认药盒取药后自动完成，未确认则升级提醒",
+    phrase: "奶奶，该吃药了，请用温水送服。" },
+  { id: "wake", name: "作息守护", enabled: true, ai: "time",
+    trigger: "08:30 未检测到起床 → 通知家人",
+    phrase: "奶奶，起床了吗？需要我帮忙吗？" },
+];
+let currentRule = null;
+let upgrade = { range: 3, step: 15 };
 
-async function tickFrame() {
-  if (frameBusy) return;
-  frameBusy = true;
-  try {
-    const d = await getJSON("/api/frame");
-    if (d.ok) {
-      if (d.width && d.height) {
-        frameOrigW = d.width;
-        frameOrigH = d.height;
-      }
-      $("frame").src = "data:image/jpeg;base64," + d.jpeg_b64;
-      $("frameCap").textContent = fmtTime(d.ts);
-      renderRoiCanvas();
-    }
-  } catch (e) { /* 后端没起感知时静默 */ }
-  finally { frameBusy = false; }
+function renderRules() {
+  $("ruleList").innerHTML = rules.map(r => `
+    <div class="rule" data-id="${r.id}">
+      <div class="rule-info" data-open="${r.id}">
+        <div class="rule-name">${r.name}</div>
+        <div class="rule-trigger">${r.trigger}</div>
+      </div>
+      <span class="muted">${r.enabled ? "已启用" : "已停用"}</span>
+      <label class="switch"><input type="checkbox" data-toggle="${r.id}" ${r.enabled ? "checked" : ""}><i></i></label>
+    </div>`).join("");
+  document.querySelectorAll("[data-toggle]").forEach(input => {
+    input.addEventListener("change", () => {
+      const rule = rules.find(r => r.id === input.dataset.toggle);
+      rule.enabled = input.checked;
+      renderRules();
+      toast(`${rule.name} 已${rule.enabled ? "启用" : "停用"}`);
+    });
+  });
+  document.querySelectorAll("[data-open]").forEach(el => {
+    el.addEventListener("click", () => openRule(el.dataset.open));
+  });
 }
 
-/* ---------- WebSocket ---------- */
-function connectWS() {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  const suffix = AUTH_TOKEN ? `?token=${encodeURIComponent(AUTH_TOKEN)}` : "";
-  ws = new WebSocket(`${proto}://${location.host}/ws${suffix}`);
-  ws.onopen = () => {
-    $("dot").className = "dot on";
-    $("connLabel").textContent = "已连接";
-    reconnectDelay = 1000;
-  };
-  ws.onclose = (ev) => {
-    if (ev.code === 1008) { requireAuth(); return; }  // token 或 Origin 不通过
-    $("dot").className = "dot off";
-    $("connLabel").textContent = "已断开，重连中…";
-    setTimeout(connectWS, reconnectDelay);
-    reconnectDelay = Math.min(reconnectDelay * 2, 15000);
-  };
-  ws.onmessage = (ev) => {
-    let msg;
-    try { msg = JSON.parse(ev.data); } catch (e) { return; }
-    if (msg.type === "hello") { renderState(msg.state); return; }
-    if (msg.type === "notify.family") {
-      const p = msg.payload || {};
-      addMessage({
-        direction: "to_family",
-        text: p.msg, urgent: !!p.urgent,
-        sender: "老人", recipient: "家人",
-        ts: msg.ts,
-      }, false);
-      if (p.urgent) toast("⚠ 收到紧急消息");
-      return;
-    }
-    if (msg.type && msg.type.startsWith("state.")) {
-      // 状态变化：直接拉全量快照刷新（局部 new 可能是标量，渲染会失真）
-      loadState();
-    }
-  };
+function upgradeText() {
+  const steps = [0, 1, 2, 3].map(i => `T+${i * upgrade.step}`);
+  const labels = ["提醒", "再次提醒", "升级提醒", "通知家人"];
+  const upto = upgrade.range;
+  return steps.slice(0, upto + 1).map((s, i) => `${s} ${labels[i]}`).join(" → ");
 }
 
-/* ---------- 事件绑定 ---------- */
-function sendToElder() {
-  const text = $("msgInput").value.trim();
-  if (!text) return;
-  postJSON("/api/msg_to_elder", { text })
-    .then(() => {
-      $("msgInput").value = "";
-      toast("已发送，将通过音箱播报");
-      setTimeout(loadMessages, 600);
-    })
-    .catch((e) => toast("发送失败"));
+function openRule(id) {
+  currentRule = rules.find(r => r.id === id);
+  $("ruleTitle").textContent = currentRule.name;
+  $("ruleTrigger").textContent = currentRule.trigger;
+  $("rulePhrase").value = currentRule.phrase;
+  document.querySelectorAll("#aiModes .btn").forEach(b => {
+    b.classList.toggle("on", b.dataset.mode === currentRule.ai);
+  });
+  $("upgradeRange").value = upgrade.range;
+  $("upgradeStep").value = String(upgrade.step);
+  $("upgradeText").textContent = upgradeText();
+  $("ruleModal").classList.remove("hidden");
 }
-$("sendBtn").onclick = sendToElder;
-$("msgInput").addEventListener("keydown", (e) => { if (e.key === "Enter") sendToElder(); });
 
-/* ---------- 启动 ---------- */
-loadState(); loadMessages(); loadScenes(); loadRois(); connectWS();
-frameTimer = setInterval(tickFrame, 1000);
-tickFrame();
+document.querySelectorAll("#aiModes .btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    if (!currentRule) return;
+    currentRule.ai = btn.dataset.mode;
+    document.querySelectorAll("#aiModes .btn").forEach(b => b.classList.toggle("on", b === btn));
+  });
+});
+$("upgradeRange").addEventListener("input", () => {
+  upgrade.range = Number($("upgradeRange").value);
+  $("upgradeText").textContent = upgradeText();
+});
+$("upgradeStep").addEventListener("change", () => {
+  upgrade.step = Number($("upgradeStep").value);
+  $("upgradeText").textContent = upgradeText();
+});
+$("dialectBtn").addEventListener("click", () => {
+  $("dialectState").textContent = "已录制方言话术（演示，优先于合成语音）";
+  toast("方言话术已保存（演示）");
+});
+$("saveRule").addEventListener("click", () => {
+  if (!currentRule) return;
+  currentRule.phrase = $("rulePhrase").value.trim() || currentRule.phrase;
+  $("ruleModal").classList.add("hidden");
+  renderRules();
+  toast(`${currentRule.name} 已保存（演示）`);
+});
+
+/* ---------- 药品管理（mock） ---------- */
+const drugs = [
+  { name: "阿托伐他汀钙片", stock: 12, days: 3 },
+  { name: "苯磺酸氨氯地平片", stock: 4, days: 3 },
+];
+function renderDrugs() {
+  $("drugList").innerHTML = drugs.map(d => {
+    const low = d.stock <= d.days * 2;
+    return `<div class="drug"><span>${d.name}</span>
+      <span class="${low ? "warn-text" : "muted"}" style="padding:2px 8px">余量 ${d.stock} 片${low ? " · 该补药了" : ""}</span></div>`;
+  }).join("");
+}
+$("openDrugs").addEventListener("click", () => { renderDrugs(); $("drugModal").classList.remove("hidden"); });
+$("scanDrug").addEventListener("click", () => {
+  $("drugName").value = "缬沙坦胶囊";
+  toast("已识别药盒：缬沙坦胶囊（演示）");
+});
+$("addDrug").addEventListener("click", () => {
+  const name = $("drugName").value.trim();
+  if (!name) { toast("请先填写或拍照识别药品名称"); return; }
+  drugs.push({
+    name,
+    stock: Math.max(0, Number($("drugStock").value) || 0),
+    days: Math.max(1, Number($("drugDays").value) || 1),
+  });
+  $("drugName").value = "";
+  renderDrugs();
+  toast("药品已添加，补药提醒已开启（演示）");
+});
+
+renderRules();
 </script>
 </body>
 </html>

@@ -42,6 +42,7 @@ from core.state import StateStore
 from server.push import PushHub
 
 _INDEX = Path(__file__).resolve().parent / "static" / "index.html"
+_DEBUG = Path(__file__).resolve().parent / "static" / "debug.html"
 
 
 def state_snapshot(state: StateStore) -> dict:
@@ -77,6 +78,11 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
     @app.get("/")
     async def index() -> FileResponse:
         return FileResponse(_INDEX)
+
+    @app.get("/debug")
+    async def debug_console() -> FileResponse:
+        """原 M7 调试控制台：实时画面、ROI 标定、场景按钮与消息流。"""
+        return FileResponse(_DEBUG)
 
     @app.get("/healthz")
     async def healthz() -> dict:
