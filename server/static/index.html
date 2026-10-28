@@ -220,18 +220,31 @@ function addMessage(m, prepend) {
   if (!prepend) box.scrollTop = box.scrollHeight;
 }
 
+/* ---------- 鉴权 ---------- */
+const AUTH_TOKEN = new URLSearchParams(location.search).get("token")
+  || sessionStorage.getItem("BUTLER_TOKEN") || "";
+function authHeaders(extra) {
+  return AUTH_TOKEN ? { ...extra, Authorization: `Bearer ${AUTH_TOKEN}` } : extra;
+}
+function requireAuth() {
+  const t = prompt("请输入家人端访问口令（BUTLER_TOKEN）");
+  if (t) { sessionStorage.setItem("BUTLER_TOKEN", t.trim()); location.reload(); }
+}
+
 /* ---------- REST ---------- */
 async function getJSON(url) {
-  const r = await fetch(url);
+  const r = await fetch(url, { headers: authHeaders({}) });
+  if (r.status === 401) { requireAuth(); throw new Error("未授权"); }
   if (!r.ok) throw new Error(`${url} → ${r.status}`);
   return r.json();
 }
 async function postJSON(url, body) {
   const r = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: body ? JSON.stringify(body) : "{}",
   });
+  if (r.status === 401) { requireAuth(); throw new Error("未授权"); }
   if (!r.ok) {
     const t = await r.text().catch(() => "");
     throw new Error(`${r.status} ${t}`);
@@ -239,7 +252,8 @@ async function postJSON(url, body) {
   return r.json();
 }
 async function deleteJSON(url) {
-  const r = await fetch(url, { method: "DELETE" });
+  const r = await fetch(url, { method: "DELETE", headers: authHeaders({}) });
+  if (r.status === 401) { requireAuth(); throw new Error("未授权"); }
   if (!r.ok) throw new Error(`${url} → ${r.status}`);
   return r.json();
 }
@@ -458,13 +472,15 @@ async function tickFrame() {
 /* ---------- WebSocket ---------- */
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const suffix = AUTH_TOKEN ? `?token=${encodeURIComponent(AUTH_TOKEN)}` : "";
+  ws = new WebSocket(`${proto}://${location.host}/ws${suffix}`);
   ws.onopen = () => {
     $("dot").className = "dot on";
     $("connLabel").textContent = "已连接";
     reconnectDelay = 1000;
   };
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
+    if (ev.code === 1008) { requireAuth(); return; }  // token 或 Origin 不通过
     $("dot").className = "dot off";
     $("connLabel").textContent = "已断开，重连中…";
     setTimeout(connectWS, reconnectDelay);

@@ -33,7 +33,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
 from core import bus
@@ -63,6 +63,16 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
     hub = hub or PushHub()
     app = FastAPI(title="本地 AI 管家 · 家人端", docs_url=None, redoc_url=None)
     app.state.hub = hub  # 测试/运维检查活跃连接数用
+
+    @app.middleware("http")
+    async def require_api_token(request: Request, call_next):
+        """BUTLER_TOKEN 设置后，家人端 API 一律要 token；回调走平台签名。"""
+        from server.auth import api_authorized
+        path = request.url.path
+        if path.startswith("/api/") and not path.startswith("/api/webhook/"):
+            if not api_authorized(request):
+                return JSONResponse({"detail": "unauthorized"}, status_code=401)
+        return await call_next(request)
 
     @app.get("/")
     async def index() -> FileResponse:
@@ -119,8 +129,24 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
         return {"ok": True, "text": text}
 
     @app.post("/api/webhook/family_reply")
-    async def api_webhook_family_reply(body: dict = Body(...)) -> dict:
-        """接收外部 Webhook（钉钉/飞书机器人或通用 Webhook）的家人回复，并转发给老人。"""
+    async def api_webhook_family_reply(request: Request) -> dict:
+        """接收钉钉/飞书回调。先验签，失败直接 401，不落库、不播报。"""
+        from core import config
+        from server.webhook_auth import verify_webhook
+        raw = await request.body()
+        ok, reason = verify_webhook(
+            request.headers, raw,
+            dingtalk_secret=config.dingtalk_sign_secret(),
+            feishu_secret=config.feishu_sign_secret())
+        if not ok:
+            raise HTTPException(status_code=401, detail=reason)
+        try:
+            body = json.loads(raw or b"{}")
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=422, detail="非法 JSON")
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=422, detail="非法 JSON")
+
         # 兼容飞书 URL 校验事件
         if body.get("type") == "url_verification" and "challenge" in body:
             return {"challenge": body["challenge"]}
@@ -275,13 +301,20 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket) -> None:
-        """实时事件推送：先发 hello 快照，再逐条转发总线事件。
-
-        事件源（hub 队列）与客户端断开（ws.receive）同时监听：只 await
-        队列的话端点察觉不到断开，客户端/服务关停时会把后台任务挂到天荒地老
-        （评审实测挂点）。recv_task 跨迭代复用、get_task 每次新建并在断开
-        时显式 await 收尾——不留孤儿任务。
-        """
+        """实时事件推送。先校验 token 与 Origin，再发 hello 快照。"""
+        from core import config
+        from server.auth import origin_allowed, ws_authorized
+        token = ws.query_params.get("token", "")
+        auth = ws.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            token = auth[7:].strip()
+        if not ws_authorized(token):
+            await ws.close(code=1008)
+            return
+        allowed = config.settings().get("server", {}).get("allowed_origins") or []
+        if not origin_allowed(ws.headers.get("origin"), allowed):
+            await ws.close(code=1008)  # 跨站 WebSocket：防止任意网页读取家人状态
+            return
         await ws.accept()
         q = hub.register()
         recv_task = asyncio.create_task(ws.receive())

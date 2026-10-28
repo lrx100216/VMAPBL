@@ -299,6 +299,24 @@ curl -s -X POST http://127.0.0.1:8321/api/webhook/family_reply -H 'Content-Type:
 语音开关与超时在 `config/settings.yaml` 的 `voice:` 分区；路由关键词与长度上限在
 `family_router:` 分区。麦克风不可用时语音回路有限重试后自动退出，感知与告警继续运行。
 
+**安全加固：token 与回调签名**。
+
+- 设置 `BUTLER_TOKEN` 后：`/api/*`（回调除外）必须带 `Authorization: Bearer <token>` 或 `?token=`；
+  WebSocket 必须 `?token=`，且浏览器 `Origin` 只能是本机或 `server.allowed_origins` 白名单；
+  `/healthz`、`/readyz` 保持公开供 launchd/看门狗探测。未设置时保持本机调试体验。
+- 设置 `DINGTALK_SIGN_SECRET` / `FEISHU_SIGN_SECRET` 后：
+  `/api/webhook/family_reply` 按平台算法验签（钉钉 HMAC-SHA256、飞书 sha256），
+  时间戳窗口 5 分钟；签名缺失/错误/过期一律 401，**不落库、不播报**。
+  未配置密钥时保持向后兼容，生产环境必须配置。
+
+```bash
+BUTLER_TOKEN=你的口令 python main.py --serve
+curl -s -H "Authorization: Bearer 你的口令" http://127.0.0.1:8321/api/state
+```
+
+家人端页面可用 `http://127.0.0.1:8321/?token=你的口令` 打开；没带 token 时，
+接口返回 401 会弹窗要求输入口令。
+
 **第三阶段：真机部署与常驻运维验证**。
 
 网络摄像头：`VIDEO_SOURCE` 支持 `rtsp://`、`rtmp://`、`http(s)://`，走 FFmpeg 后端，

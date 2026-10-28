@@ -104,3 +104,16 @@ def video_source() -> "str | int":
     """视频源："0" → 摄像头索引 0；否则视为回放文件路径（离线回放模式，规范第八节）。"""
     raw = os.getenv("VIDEO_SOURCE", "0").strip()
     return int(raw) if raw.isdigit() else raw
+
+
+def butler_token() -> str:
+    """家人端访问口令；为空时保持本机调试模式（生产部署必须设置）。"""
+    return os.getenv("BUTLER_TOKEN", "").strip()
+
+
+def dingtalk_sign_secret() -> str:
+    return os.getenv("DINGTALK_SIGN_SECRET", "").strip()
+
+
+def feishu_sign_secret() -> str:
+    return os.getenv("FEISHU_SIGN_SECRET", "").strip()
