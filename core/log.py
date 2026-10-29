@@ -1,10 +1,11 @@
 """SQLite 决策日志：每一次场景决策与云端调用都落库，供复盘与成本核算。
 
-三张表：
+四张表：
 - events：场景生命周期事件（trigger / condition / action / action_result /
   done / skipped / error），detail 为 JSON；
 - api_calls：云端调用明细（backend/model/token/成本），M3 起由 skills/vision.py 写入；
-- messages：老人 ↔ 家人的消息（M3 起，M7 家人端控制台直接读这张表）。
+- messages：老人 ↔ 家人的消息（M3 起，M7 家人端控制台直接读这张表）；
+- notification_outbox：紧急外部通知的持久化重试队列（pending/delivered/dead）。
 
 实现说明：SQLite 用 WAL 模式；写操作加锁（asyncio 单线程 + 未来可能的线程读）。
 """
@@ -44,11 +45,27 @@ CREATE TABLE IF NOT EXISTS messages (
     urgent INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'unread'   -- unread / read / replied
 );
+CREATE TABLE IF NOT EXISTS notification_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    msg_id INTEGER,
+    text TEXT NOT NULL,
+    urgent INTEGER NOT NULL DEFAULT 1,
+    sender TEXT NOT NULL DEFAULT '',
+    recipient TEXT NOT NULL DEFAULT '',
+    direction TEXT NOT NULL DEFAULT 'to_family',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_ts REAL NOT NULL,
+    last_error TEXT,
+    created_ts REAL NOT NULL,
+    updated_ts REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_scene ON events(scene_id);
 CREATE INDEX IF NOT EXISTS idx_api_ts ON api_calls(ts);
 CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
 CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
+CREATE INDEX IF NOT EXISTS idx_outbox_status_next ON notification_outbox(status, next_attempt_ts);
 """
 
 
@@ -154,6 +171,72 @@ class EventLog:
             self._conn.execute("UPDATE messages SET status = ? WHERE id = ?",
                                (status, msg_id))
             self._conn.commit()
+
+    def enqueue_notification(self, msg_id: int, text: str, *, urgent: bool = True,
+                             sender: str = "", recipient: str = "",
+                             direction: str = "to_family",
+                             next_attempt_ts: float,
+                             error: str = "") -> int:
+        """把一条待外发消息持久化；同一 msg_id 不重复排队。"""
+        now = time.time()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM notification_outbox"
+                " WHERE msg_id=? AND status='pending' LIMIT 1", (msg_id,)).fetchone()
+            if row:
+                return int(row[0])
+            cur = self._conn.execute(
+                "INSERT INTO notification_outbox("
+                "msg_id,text,urgent,sender,recipient,direction,status,attempts,"
+                "next_attempt_ts,last_error,created_ts,updated_ts)"
+                " VALUES(?,?,?,?,?,?,'pending',1,?,?,?,?)",
+                (msg_id, text, int(urgent), sender, recipient, direction,
+                 float(next_attempt_ts), error[:300], now, now))
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def due_notifications(self, now: float, limit: int = 10) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id,msg_id,text,urgent,sender,recipient,direction,attempts"
+                " FROM notification_outbox"
+                " WHERE status='pending' AND next_attempt_ts<=?"
+                " ORDER BY next_attempt_ts,id LIMIT ?", (float(now), int(limit))).fetchall()
+        return [{"id": r[0], "msg_id": r[1], "text": r[2], "urgent": bool(r[3]),
+                 "sender": r[4], "recipient": r[5], "direction": r[6],
+                 "attempts": int(r[7])} for r in rows]
+
+    def mark_notification_attempt(self, row_id: int, *, delivered: bool,
+                                  next_attempt_ts: float, error: str = "",
+                                  max_attempts: int = 8) -> None:
+        """更新一次 worker 尝试；超过总上限转 dead，绝不无限重试。"""
+        with self._lock:
+            if delivered:
+                self._conn.execute(
+                    "UPDATE notification_outbox SET status='delivered',"
+                    " next_attempt_ts=?,last_error=NULL,updated_ts=? WHERE id=?",
+                    (float(next_attempt_ts), time.time(), int(row_id)))
+            else:
+                self._conn.execute(
+                    "UPDATE notification_outbox SET attempts=attempts+1,"
+                    " status=CASE WHEN attempts+1>=? THEN 'dead' ELSE 'pending' END,"
+                    " next_attempt_ts=?,last_error=?,updated_ts=? WHERE id=?",
+                    (int(max_attempts), float(next_attempt_ts), error[:300],
+                     time.time(), int(row_id)))
+            self._conn.commit()
+
+    def notification_health(self) -> dict:
+        """通知健康快照：pending/dead 与最近真实送达时间。"""
+        with self._lock:
+            pending = self._conn.execute(
+                "SELECT COUNT(*) FROM notification_outbox WHERE status='pending'").fetchone()[0]
+            dead = self._conn.execute(
+                "SELECT COUNT(*) FROM notification_outbox WHERE status='dead'").fetchone()[0]
+            last = self._conn.execute(
+                "SELECT MAX(updated_ts) FROM notification_outbox"
+                " WHERE status='delivered'").fetchone()[0]
+        return {"pending_count": int(pending), "dead_count": int(dead),
+                "last_delivered_ts": last}
 
     def ping(self) -> bool:
         """轻量可写性探针（/readyz 与心跳用）；不抛异常。"""

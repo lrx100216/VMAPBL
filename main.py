@@ -141,13 +141,16 @@ async def _start_ops_tasks(log: EventLog):
         voice_task = start_voice_loop(stop_event=voice_stop)
     heartbeat_task = asyncio.create_task(
         _heartbeat_loop(log, voice_task), name="heartbeat")
-    return voice_stop, voice_task, heartbeat_task
+    from skills.notify import notification_retry_loop
+    notify_task = asyncio.create_task(
+        notification_retry_loop(log, stop_event=voice_stop), name="notify-retry")
+    return voice_stop, voice_task, heartbeat_task, notify_task
 
 
 async def _stop_ops_tasks(voice_stop: asyncio.Event, voice_task,
-                          heartbeat_task) -> None:
+                          heartbeat_task, notify_task) -> None:
     voice_stop.set()
-    for task in (voice_task, heartbeat_task):
+    for task in (voice_task, heartbeat_task, notify_task):
         if task is None:
             continue
         task.cancel()
@@ -222,7 +225,7 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
         raise
 
     # 服务确实起来后再启动语音与心跳，避免端口占用等启动失败留下孤儿任务
-    voice_stop, voice_task, heartbeat_task = await _start_ops_tasks(log)
+    voice_stop, voice_task, heartbeat_task, notify_task = await _start_ops_tasks(log)
 
     print(f"🌐 家人端控制台：http://{host}:{port}")
     print(f"🎙 常驻语音回路：{'已启动' if voice_task else '未启用'}"
@@ -233,7 +236,7 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n服务退出。")
     finally:
-        await _stop_ops_tasks(voice_stop, voice_task, heartbeat_task)
+        await _stop_ops_tasks(voice_stop, voice_task, heartbeat_task, notify_task)
         server.should_exit = True  # 优雅停服（比 cancel 干净，无 lifespan 噪音）
         try:
             await asyncio.wait_for(asyncio.shield(server_task), timeout=3.0)
@@ -308,7 +311,7 @@ async def _vla_serve_loop(engine: SceneEngine, log: EventLog) -> int:
         cam.stop()
         raise
 
-    voice_stop, voice_task, heartbeat_task = await _start_ops_tasks(log)
+    voice_stop, voice_task, heartbeat_task, notify_task = await _start_ops_tasks(log)
 
     print(f"🌐 家人端控制台：http://{host}:{port}")
     print(f"🎙 常驻语音回路：{'已启动' if voice_task else '未启用'}")
@@ -330,7 +333,7 @@ async def _vla_serve_loop(engine: SceneEngine, log: EventLog) -> int:
         print("\nVLA 服务退出。")
     finally:
         stop_ev.set()
-        await _stop_ops_tasks(voice_stop, voice_task, heartbeat_task)
+        await _stop_ops_tasks(voice_stop, voice_task, heartbeat_task, notify_task)
         server.should_exit = True
         try:
             await asyncio.wait_for(asyncio.shield(server_task), timeout=3.0)

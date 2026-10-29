@@ -583,7 +583,8 @@ async def dispatch_action(
             receipt = await notify.send_with_receipt(
                 msg, urgent=urgent, direction=direction, sender=sender,
                 recipient=recipient)
-            res = {"status": "ok", "msg_id": receipt.msg_id,
+            res = {"status": "ok" if receipt.delivered else receipt.status,
+                   "msg_id": receipt.msg_id,
                    "delivered": receipt.delivered, "urgent": urgent,
                    "msg": msg, "channels": receipt.channels}
 

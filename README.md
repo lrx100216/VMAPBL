@@ -355,6 +355,17 @@ python main.py --require-production --serve
   画面返回 503，不再用旧图伪装实时。
 - `bus.publish_nowait` 保留任务强引用，新增 `await bus.drain()` 用于停服和测试排空。
 
+**P1-2 通知可靠性**。
+
+- 仅传输异常、429 和 5xx 重试；协议/URL/重定向等确定性错误立即失败。
+- 429 尊重有上限的 `Retry-After`，整次回执受 `notify.receipt_deadline_s` 限制。
+- 紧急通知未送达时写入 SQLite `notification_outbox`，返回 `pending`，不是 `ok`。
+- `notification_retry_loop` 随 `--serve` 启动，重启后继续消费 pending；
+  达到 `retry_total_attempts` 后转 `dead`，避免无限重试。
+- `/readyz` 与心跳公开 pending/dead；存在未恢复通知时 `ready=false`，
+  独立看门狗可给出 `not_ready:notify`。只有实际平台回执成功才算 delivered，
+  原有的“未送达不武装跌倒静默”保持不变。
+
 **第三阶段：真机部署与常驻运维验证**。
 
 网络摄像头：`VIDEO_SOURCE` 支持 `rtsp://`、`rtmp://`、`http(s)://`，走 FFmpeg 后端，

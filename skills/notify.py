@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
@@ -27,6 +28,13 @@ class NotificationResult:
     attempted: bool
     delivered: bool
     channels: dict[str, str]
+    pending: bool = False
+
+    @property
+    def status(self) -> str:
+        if self.delivered:
+            return "delivered"
+        return "pending" if self.pending else "undelivered"
 
 
 def get_webhook_urls() -> dict[str, str]:
@@ -78,15 +86,23 @@ async def _send_one_webhook(client: httpx.AsyncClient, key: str, name: str,
         cfg = config.settings().get("notify") or {}
         max_attempts = max(1, int(cfg.get("max_attempts", 3)))
         backoff = max(0.0, float(cfg.get("retry_backoff_s", 0.5)))
+        max_retry_after = max(0.0, float(cfg.get("max_retry_after_s", 10.0)))
     except (TypeError, ValueError):
         # 配置错误时一个请求都没发出，不能伪报“已尝试”。
         return "failed", 0
 
     for attempt in range(1, max_attempts + 1):
+        delay = backoff * (2 ** (attempt - 1))
         try:
             resp = await client.post(url, json=payload)
-            if resp.status_code == 429 or resp.status_code >= 500:
-                pass  # 限流和服务端故障可重试
+            if resp.status_code == 429:
+                try:
+                    retry_after = float(resp.headers.get("Retry-After", "0"))
+                except ValueError:
+                    retry_after = 0.0
+                delay = max(delay, min(max(0.0, retry_after), max_retry_after))
+            elif resp.status_code >= 500:
+                pass  # 服务端临时故障可重试
             elif not 200 <= resp.status_code < 300:
                 return "failed", attempt
             else:
@@ -95,11 +111,17 @@ async def _send_one_webhook(client: httpx.AsyncClient, key: str, name: str,
                 except (ValueError, TypeError, AttributeError):
                     return "failed", attempt
                 return ("delivered" if acknowledged else "failed"), attempt
+        except (httpx.UnsupportedProtocol, httpx.TooManyRedirects, httpx.InvalidURL) as e:
+            print(f"[notify] {name} 确定性请求错误（{type(e).__name__}），不重试")
+            return "failed", attempt
+        except httpx.TransportError as e:
+            print(f"[notify] {name} 第 {attempt} 次传输异常（{type(e).__name__}）")
         except httpx.HTTPError as e:
-            print(f"[notify] {name} 第 {attempt} 次网络异常（{type(e).__name__}）")
+            print(f"[notify] {name} 非临时错误（{type(e).__name__}），不重试")
+            return "failed", attempt
 
         if attempt < max_attempts:
-            await asyncio.sleep(backoff * (2 ** (attempt - 1)))
+            await asyncio.sleep(delay)
     return "failed", max_attempts
 
 
@@ -195,6 +217,26 @@ async def dispatch_external(formatted_msg: str, *, urgent: bool,
         return result
 
 
+async def _dispatch_with_deadline(formatted_msg: str, **kwargs) -> NotificationResult:
+    """限制整次回执等待，避免慢响应拖住安全场景和重试 worker。"""
+    from core import config
+    cfg = config.settings().get("notify") or {}
+    deadline = float(cfg.get("receipt_deadline_s", 10.0))
+    try:
+        return await asyncio.wait_for(
+            dispatch_external(formatted_msg, **kwargs), timeout=deadline)
+    except asyncio.TimeoutError:
+        urls = get_webhook_urls()
+        result = NotificationResult(
+            msg_id=kwargs.get("msg_id"),
+            attempted=any(urls.values()),
+            delivered=False,
+            channels={name: "timeout" for name, url in urls.items() if url},
+        )
+        _record_delivery_result(result, error_type="TimeoutError")
+        return result
+
+
 async def wait_pending() -> None:
     """等待当前所有后台推送任务完成（供单测与排空使用）。"""
     if _BACKGROUND_TASKS:
@@ -261,10 +303,74 @@ async def send_with_receipt(msg: str, urgent: bool = False, *,
         return NotificationResult(msg_id=msg_id, attempted=False,
                                   delivered=False, channels={})
     formatted_msg = _format_external_message(msg, urgent)
-    result = await dispatch_external(
+    result = await _dispatch_with_deadline(
         formatted_msg, urgent=urgent, direction=direction,
         sender=sender, recipient=recipient, msg_id=msg_id)
     if not result.delivered and not result.attempted:
         # 无渠道或客户端未建立：安全场景同样要留下“未外部送达”的审计记录。
         _record_delivery_result(result)
+    if urgent and not result.delivered and msg_id is not None:
+        from core import config
+        log = default_log()
+        if log is not None:
+            try:
+                cfg = config.settings().get("notify") or {}
+                delay = max(0.0, float(cfg.get("retry_backoff_s", 0.5)))
+                log.enqueue_notification(
+                    msg_id, formatted_msg, urgent=True, sender=sender,
+                    recipient=recipient, direction=direction,
+                    next_attempt_ts=time.time() + delay,
+                    error=",".join(f"{k}:{v}" for k, v in result.channels.items()))
+                result = replace(result, pending=True)
+            except Exception as e:
+                print(f"[notify] 持久化重试队列失败（{type(e).__name__}）")
     return result
+
+
+async def notification_retry_loop(log, *, stop_event: asyncio.Event | None = None,
+                                  interval_s: float | None = None,
+                                  max_rounds: int | None = None) -> None:
+    """消费 SQLite outbox；重启后从 pending 恢复，超过总次数转 dead。"""
+    from core import config
+    cfg = config.settings().get("notify") or {}
+    interval = float(interval_s if interval_s is not None
+                     else cfg.get("retry_worker_interval_s", 5.0))
+    max_total = max(1, int(cfg.get("retry_total_attempts", 8)))
+    base_backoff = max(0.0, float(cfg.get("retry_backoff_s", 0.5)))
+    rounds = 0
+
+    def stopped() -> bool:
+        return stop_event is not None and stop_event.is_set()
+
+    while not stopped():
+        try:
+            rows = log.due_notifications(time.time())
+            for row in rows:
+                if stopped():
+                    break
+                result = await _dispatch_with_deadline(
+                    row["text"], urgent=bool(row["urgent"]),
+                    direction=row["direction"], sender=row["sender"],
+                    recipient=row["recipient"], msg_id=row["msg_id"])
+                attempt_no = int(row["attempts"]) + 1
+                delay = min(60.0, base_backoff * (2 ** min(attempt_no, 6)))
+                log.mark_notification_attempt(
+                    row["id"], delivered=result.delivered,
+                    next_attempt_ts=time.time() + (0.0 if result.delivered else delay),
+                    error="" if result.delivered else "undelivered",
+                    max_attempts=max_total)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[notify] 重试 worker 本轮失败（{type(e).__name__}）")
+
+        rounds += 1
+        if max_rounds is not None and rounds >= max_rounds:
+            return
+        if stop_event is not None:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=max(0.01, interval))
+            except asyncio.TimeoutError:
+                pass
+        else:
+            await asyncio.sleep(max(0.01, interval))

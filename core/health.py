@@ -39,6 +39,16 @@ def readiness(*, camera=None, log=None, pose=None,
     checks["db"] = True if log is None else bool(log.ping())
     details["db"] = {"ok": checks["db"]}
 
+    if log is not None:
+        try:
+            health = log.notification_health()
+            checks["notify"] = (health["pending_count"] == 0
+                                and health["dead_count"] == 0)
+            details["notify"] = health
+        except Exception as e:
+            checks["notify"] = False
+            details["notify"] = {"error": type(e).__name__}
+
     ready = all(checks.values())
     return ready, {"ready": ready, "ts": ts, "checks": checks,
                    "details": details}
