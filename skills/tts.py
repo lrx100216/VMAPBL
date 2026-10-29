@@ -34,7 +34,17 @@ async def _spawn_say(text: str) -> None:
     cmd.extend(["--", text])
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-    await proc.wait()
+    timeout_s = float(cfg.get("timeout_s", 60.0))
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        # 先终止子进程再等待回收，随后由 speak() 统一释放半双工状态
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        await proc.wait()
+        raise
 
 
 # 测试注入点：替换这个函数即可拦截真实播报
@@ -43,7 +53,7 @@ _runner: Callable[[str], Awaitable[None]] = _spawn_say
 
 async def speak(text: str) -> None:
     """播报一段文本。互斥排队；空文本直接忽略；绝不抛异常到场景层。"""
-    text = (text or "").strip()
+    text = (text or "").strip()[:200]  # 防止长文本长时间占用麦克风与播报锁
     if not text:
         return
     tail_s = float(_tts_settings().get("tail_silence_ms", 400)) / 1000.0
@@ -54,6 +64,10 @@ async def speak(text: str) -> None:
         except Exception as e:
             print(f"[tts] 播报失败（{type(e).__name__}: {e}）：{text[:40]}")
         finally:
-            # 尾静默：say 退出后扬声器/房间回响仍可能持续，强制静默后才恢复收音
-            await asyncio.sleep(tail_s)
+            try:
+                # 尾静默也可能被取消；复位后再传播取消，不能吞掉关停信号
+                await asyncio.sleep(tail_s)
+            except asyncio.CancelledError:
+                state.set("speaking", False)
+                raise
             state.set("speaking", False)

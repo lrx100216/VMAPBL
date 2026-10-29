@@ -36,6 +36,17 @@ class ActionType(StrEnum):
     WAIT = "WAIT"
 
 
+def _num(value: Any, default: float = 0.0, *,
+         minimum: float = 0.0, maximum: float | None = None) -> float:
+    """把外部动作参数转成有界数值；非法输入不得炸穿动作链。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = float(default)
+    number = max(minimum, number)
+    return min(number, maximum) if maximum is not None else number
+
+
 @dataclass
 class VLAAction:
     """结构化动作表示。"""
@@ -255,9 +266,9 @@ class VLAPolicy:
                 "error": error,
             }
 
-        # 3. 语音中明确表示吃过药了
-        med_done_keywords = ["吃了", "吃过了", "药吃了", "刚吃过", "已吃", "吃好了"]
-        if speech and any(k in speech for k in med_done_keywords):
+        # 3. 语音中明确提到药且表示已服用（“我吃了饭了”不算）
+        from skills.medication_text import is_medication_taken_reply, slot_for_time
+        if is_medication_taken_reply(speech):
             return {
                 "scene_understanding": f"老人语音告知已服药：「{speech}」。",
                 "safety_risk": "normal",
@@ -265,7 +276,7 @@ class VLAPolicy:
                 "actions": [
                     {
                         "type": ActionType.RECORD_MEDICATION.value,
-                        "payload": {"slot": "morning", "taken": True},
+                        "payload": {"slot": slot_for_time(), "taken": True},
                     },
                     {
                         "type": ActionType.SPEAK.value,
@@ -509,7 +520,12 @@ class VLAPolicy:
         if raw.get("uncertain"):
             return self._safe_fallback(obs, error=str(raw.get("error", "uncertain output")))
 
-        return self._normalize_decision(raw, obs)
+        try:
+            return self._normalize_decision(raw, obs)
+        except Exception as e:
+            # 模型合法 JSON 也可能含错误类型；归一化失败不得丢本次安全事件
+            return self._safe_fallback(
+                obs, error=f"归一化失败 {type(e).__name__}: {str(e)[:200]}")
 
 
 # ============================================================================
@@ -527,7 +543,7 @@ async def dispatch_action(
     - SPEAK: 调用 skills.tts.speak（若 listen_reply_s > 0，紧接着调用 skills.stt.listen 收音）；
     - NOTIFY_FAMILY: 调用 skills.notify.send；
     - RECORD_MEDICATION: 调用 state.mark_medication；
-    - UPDATE_STATE: 调用 state.set；
+    - UPDATE_STATE: 仅允许写入 is_still: bool，其余字段一律 rejected；
     - STOP_ALERT: 设置静默截止时间；
     - WAIT: asyncio.sleep 等待。
     """
@@ -546,7 +562,8 @@ async def dispatch_action(
     try:
         if act_type == ActionType.SPEAK.value:
             text = str(payload.get("text", "")).strip()
-            listen_s = float(payload.get("listen_reply_s", 0.0) or 0.0)
+            listen_s = _num(payload.get("listen_reply_s", 0.0), 0.0,
+                            minimum=0.0, maximum=15.0)
             reply = ""
             if text:
                 from skills import tts
@@ -582,19 +599,26 @@ async def dispatch_action(
         elif act_type == ActionType.UPDATE_STATE.value:
             entity = str(payload.get("entity", "")).strip()
             value = payload.get("value")
-            if target_state is not None and entity:
+            # 模型只能写这一个低风险布尔字段；任何其他字段都可能破坏守护闭环
+            if target_state is not None and entity == "is_still" \
+                    and isinstance(value, bool):
                 target_state.set(entity, value)
-            res = {"status": "ok", "entity": entity, "value": value}
+                res = {"status": "ok", "entity": entity, "value": value}
+            else:
+                res = {"status": "rejected", "entity": entity,
+                       "error": "UPDATE_STATE 仅允许 is_still: bool"}
 
         elif act_type == ActionType.STOP_ALERT.value:
-            duration_s = float(
-                payload.get("duration_s") or payload.get("seconds") or payload.get("re_alert_s") or 1800.0
-            )
+            duration_s = _num(
+                payload.get("duration_s") or payload.get("seconds")
+                or payload.get("re_alert_s") or 1800.0,
+                1800.0, minimum=0.0, maximum=86400.0)
             expiry = silence_alert(duration_s)
             res = {"status": "ok", "duration_s": duration_s, "silence_expiry": expiry}
 
         elif act_type == ActionType.WAIT.value:
-            seconds = float(payload.get("seconds", 0.0) or 0.0)
+            seconds = _num(payload.get("seconds", 0.0), 0.0,
+                           minimum=0.0, maximum=30.0)
             if seconds > 0:
                 await asyncio.sleep(seconds)
             res = {"status": "ok", "waited_s": seconds}
@@ -660,8 +684,20 @@ async def decide_and_act(
         except Exception:
             pass
 
-    # 1. 策略决策
-    decision = await pol.decide(obs)
+    # 1. 策略决策；任何异常都必须转成可执行的本地安全兜底
+    try:
+        decision = await pol.decide(obs)
+    except Exception as e:
+        decision = VLAPolicy()._safe_fallback(
+            obs, error=f"策略异常 {type(e).__name__}: {str(e)[:200]}")
+        if target_log is not None:
+            try:
+                target_log.log_event(
+                    scene_id="vla_agent", kind="error",
+                    detail={"阶段": "decision", "错误类型": type(e).__name__,
+                            "错误": str(e)[:500]})
+            except Exception:
+                pass
 
     if target_log is not None:
         try:
@@ -716,7 +752,7 @@ async def decide_and_act(
         )
         if (
             act_dict.get("type") == ActionType.SPEAK.value
-            and float(payload.get("listen_reply_s", 0.0) or 0.0) > 0
+            and _num(payload.get("listen_reply_s", 0.0), 0.0) > 0
             and is_safety_check
         ):
             reply = str(res.get("reply") or "").strip()

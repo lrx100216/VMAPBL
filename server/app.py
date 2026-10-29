@@ -43,6 +43,13 @@ from server.push import PushHub
 
 _INDEX = Path(__file__).resolve().parent / "static" / "index.html"
 _DEBUG = Path(__file__).resolve().parent / "static" / "debug.html"
+_MAX_MESSAGE_CHARS = 200
+
+
+def _validate_message_text(text: str) -> None:
+    if len(text) > _MAX_MESSAGE_CHARS:
+        raise HTTPException(status_code=422,
+                            detail=f"留言不能超过 {_MAX_MESSAGE_CHARS} 字")
 
 
 def state_snapshot(state: StateStore) -> dict:
@@ -117,6 +124,8 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
                           body: dict = Body(default={})) -> dict:
         """手动触发场景：调试期最有用的功能（规范 M7）。"""
         ctx = {"text": str(body.get("text", ""))} if body.get("text") else None
+        if ctx:
+            _validate_message_text(ctx["text"])
         try:
             ran = await engine.trigger(scene_id, ctx=ctx)
         except Exception as e:
@@ -130,6 +139,7 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
         text = str(body.get("text") or "").strip()
         if not text:
             raise HTTPException(status_code=422, detail="留言不能为空")
+        _validate_message_text(text)
         await bus.publish({"type": "family.msg_to_elder",
                            "payload": {"text": text, "sender": "家人"}})
         return {"ok": True, "text": text}
@@ -187,6 +197,7 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
 
         if not text:
             raise HTTPException(status_code=422, detail="留言不能为空")
+        _validate_message_text(text)
 
         sender = str(body.get("sender") or body.get("senderNick") or "家人").strip() or "家人"
         from skills.family_router import route_family_message

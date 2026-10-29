@@ -36,6 +36,7 @@ occupancy:
 tts:
   voice: Tingting                # say -v 的声音名（系统内置中文女声）
   rate: 0                        # say -r 语速（词/分），0 = 系统默认；老人听不清可调 150
+  timeout_s: 60                  # 单次播报子进程最长运行时间，超时 kill 并恢复收音
   tail_silence_ms: 400           # 播报结束后强制静默（半双工硬性要求，规范第四节）
 stt:
   model_size: small              # faster-whisper 模型（首次使用自动下载约 460MB）

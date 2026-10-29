@@ -237,14 +237,14 @@ async def test_dispatch_action_all_types(monkeypatch):
         assert res_med["status"] == "ok"
         assert state.medication_taken["morning"] is True
 
-        # 4. UPDATE_STATE
+        # 4. UPDATE_STATE（VLA 仅允许写低风险布尔字段）
         res_state = await dispatch_action(
-            {"type": "UPDATE_STATE", "payload": {"entity": "occupancy", "value": True}},
+            {"type": "UPDATE_STATE", "payload": {"entity": "is_still", "value": True}},
             state=state,
             log=log,
         )
         assert res_state["status"] == "ok"
-        assert state.occupancy is True
+        assert state.is_still is True
 
         # 5. STOP_ALERT
         res_silence = await dispatch_action(
@@ -343,6 +343,8 @@ async def test_main_cli_vla_mode(monkeypatch):
     monkeypatch.setattr("sys.argv", ["main.py", "--mode", "vla", "--trigger", "medication", "--text", "早药"])
 
     code = await amain()
+    from core.log import set_default
+    set_default(None)  # amain 关闭了 EventLog；清理全局引用，避免污染后续用例
     assert code == 0
     assert len(ran_vla) == 1
     assert ran_vla[0]["trigger_reason"] == "medication"

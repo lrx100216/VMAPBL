@@ -318,6 +318,15 @@ curl -s -H "Authorization: Bearer 你的口令" http://127.0.0.1:8321/api/state
 家人端页面可用 `http://127.0.0.1:8321/?token=你的口令` 打开；没带 token 时，
 接口返回 401 会弹窗要求输入口令。
 
+**第一批安全切片（2026-10-29）**。
+
+- VLA `UPDATE_STATE` 仅允许写 `is_still: bool`，其余字段拒绝；策略或参数异常
+  统一进入本地安全兜底并落 `error` 审计。
+- 服药语音确认必须明确提到药且无否定表达，classic 与 VLA 共用判定；
+  「我吃了饭了」不记服药，VLA 按实际时间写 morning/noon/evening。
+- TTS 最长 200 字，`say` 超时自动 kill；成功、异常、取消、尾静默中断均会
+  复位 `speaking`，不再把麦克风永久锁在半双工状态。
+
 **第三阶段：真机部署与常驻运维验证**。
 
 网络摄像头：`VIDEO_SOURCE` 支持 `rtsp://`、`rtmp://`、`http(s)://`，走 FFmpeg 后端，

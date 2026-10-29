@@ -8,7 +8,7 @@
 - 宁可漏报不可误报：误报会让老人烦——投票阈值不向敏感方向让步，
   拿不准就当没吃（交家人跟进），绝不看到药盒就记「已服药」；
 - 权重未训练（models/pillbox.pt 不存在）→ 降级为纯语音确认：
-  问「吃了吗」，答「吃了」→ 记账；其余回复/无应答 → 非紧急通知家人。
+  问「药吃了吗」，明确提到药且确认已服才记账；其余回复/无应答 → 非紧急通知家人。
 
 探测器/姿态器是模块级懒加载单例（与 wakeup.py 的进程内存态同一纪律），
 测试经 reset_singletons() + monkeypatch 注入假实现。
@@ -126,9 +126,8 @@ async def _voice_fallback(slot: str, label: str) -> str:
     reply = (await stt.listen(
         timeout_s=float(med.get("confirm_listen_s", 8.0)))).strip()
     taken_kw = med.get("taken_keywords", ["吃了", "吃过", "吃好了"])
-    negations = ("没", "不", "别")  # 「没吃过」「还没吃」「不吃」全是没吃
-    if reply and any(k in reply for k in taken_kw) \
-            and not any(n in reply for n in negations):
+    from skills.medication_text import is_medication_taken_reply
+    if is_medication_taken_reply(reply, taken_kw):
         _get_state().mark_medication(slot, True)
         await tts.speak("好的，已记下您吃过药了。")
         return "voice_taken"

@@ -432,14 +432,14 @@ async def test_medication_box_present_but_never_touched(med_settings, monkeypatc
 
 
 async def test_medication_degraded_voice_paths(med_settings, _spoken, monkeypatch):
-    """权重未部署 → 降级纯语音：答「吃了」记账；其他回复/无应答通知家人。"""
+    """权重未部署 → 降级纯语音：明确说药已吃才记账；其他回复/无应答通知家人。"""
     from actions import medication
     from skills import stt
     sent = await _notify_stub(monkeypatch)
 
     st = StateStore()
     _wire_medication(monkeypatch, _NoDetector(), None, st)
-    monkeypatch.setattr(stt, "listen", lambda *a, **kw: _reply("吃过了"))
+    monkeypatch.setattr(stt, "listen", lambda *a, **kw: _reply("药吃过了"))
     r = await medication.medication_watch({}, slot="morning")
     assert r == "voice_taken"
     assert st.medication_taken["morning"] is True
@@ -763,7 +763,7 @@ async def test_medication_rollover_resets_yesterday(med_settings, _spoken, monke
     st.medication_taken["morning"] = True            # 昨天的 True
     _wire_medication(monkeypatch, _NoDetector(), None, st)
     medication._marked_date = "2000-01-01"           # 昨天/更早
-    monkeypatch.setattr(stt, "listen", lambda *a, **kw: _reply("吃了"))
+    monkeypatch.setattr(stt, "listen", lambda *a, **kw: _reply("药吃了"))
     assert await medication.medication_watch({}, slot="morning") == "voice_taken"
     assert st.medication_taken["morning"] is True    # 今天重新记账
     assert any("药吃了吗" in s for s in _spoken)     # 提醒正常播出（说明没被昨天吞掉）
