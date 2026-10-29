@@ -7,10 +7,11 @@
 # ============================================================
 
 # ----- M0 自检 / M1 最小闭环 -----
-opencv-python>=4.10        # 摄像头采集（必须用 cv2.CAP_AVFOUNDATION 后端）
+opencv-python>=4.10,<5        # 摄像头采集；OpenCV 5 与 av 的 libavdevice 有原生冲突
 numpy>=2.0
 sounddevice>=0.5           # 麦克风 48kHz 采集（PortAudio）
 openai>=1.50               # DeepSeek OpenAI 兼容客户端
+httpx>=0.28,<1              # 通知/Webhook 的直接 HTTP 依赖
 python-dotenv>=1.0         # .env 加载
 
 # ----- M2 骨架 -----
@@ -27,6 +28,7 @@ ultralytics>=8.4           # yolo26n / yolo26n-pose 自 v8.4.0（2026-01）起�
 coremltools>=9.0           # export(format="coreml") 导出 .mlpackage（Apple Silicon 推理）
 torch==2.9.1               # 钉死：torchaudio 2.9.1 要求同名版本；coremltools 9.0 与
 torchvision==0.24.1        # torch 2.14 的导出路径不兼容（2026-09-23 实测教训）
+torchaudio==2.9.1          # 与 torch/torchvision 同组锁定，避免新环境缺包或错配
 ruamel.yaml>=0.18          # ROI 标定工具写回 settings.yaml 时保留人工注释
 
 # ----- M7 家人端 -----

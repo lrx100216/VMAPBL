@@ -318,6 +318,8 @@ async def amain() -> int:
     parser = argparse.ArgumentParser(description="本地 AI 管家（M7 完整系统入口，支持 Classic 与 VLA 双模）")
     parser.add_argument("--mode", choices=["classic", "vla"], default="classic",
                         help="运行架构模式：classic（传统级联流水线）或 vla（极低功耗快慢分层 VLA 架构，默认 classic）")
+    parser.add_argument("--require-production", action="store_true",
+                        help="启动前强制检查 token、通知、签名、模型与可写路径；不完整则退出码 2")
     parser.add_argument("--list", action="store_true", help="列出全部场景")
     parser.add_argument("--trigger", metavar="SCENE_ID", action="append",
                         help="手动触发一个场景（可重复传入，按顺序依次触发）")
@@ -329,6 +331,16 @@ async def amain() -> int:
     parser.add_argument("--serve", action="store_true",
                         help="完整系统：感知回路 + 常驻语音回路 + 家人端控制台常驻（Ctrl+C 退出）")
     args = parser.parse_args()
+
+    if args.require_production:
+        from core.preflight import production_issues
+        issues = production_issues()
+        if issues:
+            print("❌ 生产启动预检未通过：")
+            for issue in issues:
+                print(f"  - {issue}")
+            return 2
+        print("✅ 生产启动预检通过")
 
     db_path = config.ROOT / config.settings().get("global", {}).get(
         "db_path", "data/butler.db")

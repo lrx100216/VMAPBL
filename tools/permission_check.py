@@ -266,12 +266,26 @@ def check_deepseek() -> None:
            f"模型 {model} 回复「{text}」（耗时 {dt:.1f}s{usage_s}）")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """按 --only 过滤执行检查，最后汇总并区分权限类/非权限类失败。"""
     parser = argparse.ArgumentParser(description="M0 · 环境与权限自检")
     parser.add_argument("--only", choices=["camera", "mic", "api"], default=None,
                         help="只重测某一项（默认三项全测）")
-    args = parser.parse_args()
+    parser.add_argument("--require-production", action="store_true",
+                        help="先检查生产配置；不完整则退出码 2，不触碰硬件或云端")
+    args = parser.parse_args(argv)
+
+    if args.require_production:
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from core.preflight import production_issues
+        issues = production_issues()
+        if issues:
+            print("❌ 生产启动预检未通过：")
+            for issue in issues:
+                print(f"  - {issue}")
+            return 2
+        print("✅ 生产启动预检通过\n")
 
     print("=" * 48)
     print("本地 AI 管家 · M0 环境与权限自检")

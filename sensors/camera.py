@@ -14,6 +14,7 @@ import logging
 import threading
 import time
 from collections import deque
+from urllib.parse import urlsplit, urlunsplit
 
 import cv2
 import numpy as np
@@ -21,6 +22,24 @@ import numpy as np
 from core import config
 
 log = logging.getLogger(__name__)
+
+
+def safe_source(source: "int | str") -> str:
+    """日志/异常中的视频源脱敏：网络流移除用户信息、密码与查询参数。"""
+    if not isinstance(source, str):
+        return str(source)
+    if not source.lower().startswith(Camera._STREAM_PREFIXES):
+        return source
+    try:
+        parts = urlsplit(source)
+        host = parts.hostname or "unknown-host"
+        try:
+            port = f":{parts.port}" if parts.port else ""
+        except ValueError:
+            port = ""
+        return urlunsplit((parts.scheme, f"{host}{port}", parts.path, "", ""))
+    except Exception:
+        return "<stream>"
 
 
 class Camera:
@@ -78,7 +97,8 @@ class Camera:
         cap = cv2.VideoCapture(self.source)
         if not cap.isOpened():
             raise RuntimeError(
-                f"网络视频源打不开：{self.source!r}。请检查地址、账号密码与网络。")
+                f"网络视频源打不开：{safe_source(self.source)!r}。"
+                "请检查地址、账号密码与网络。")
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 低延迟：不要积压旧帧
         except Exception:
@@ -104,7 +124,7 @@ class Camera:
         cap = self._open_capture()
         if not cap.isOpened():
             raise RuntimeError(
-                f"视频源打不开：{self.source!r}。"
+                f"视频源打不开：{safe_source(self.source)!r}。"
                 "摄像头请在 Terminal.app/iTerm 本地窗口首次运行以完成 TCC 授权；"
                 "文件源请检查路径与编码。")
         if not self.source_is_file and not self.source_is_stream:
@@ -122,7 +142,7 @@ class Camera:
         self._thread = threading.Thread(target=self._run, name="camera",
                                         daemon=True)
         self._thread.start()
-        log.info("采集线程已启动：source=%r file=%s", self.source,
+        log.info("采集线程已启动：source=%r file=%s", safe_source(self.source),
                  self.source_is_file)
 
     def _run(self) -> None:

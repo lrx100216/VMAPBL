@@ -327,6 +327,23 @@ curl -s -H "Authorization: Bearer 你的口令" http://127.0.0.1:8321/api/state
 - TTS 最长 200 字，`say` 超时自动 kill；成功、异常、取消、尾静默中断均会
   复位 `speaking`，不再把麦克风永久锁在半双工状态。
 
+**生产预检与依赖锁（2026-10-29）**。
+
+直接依赖范围见 `requirements.txt`，当前验证过的完整环境固定在
+`requirements-lock.txt`（OpenCV 4.x，避免 OpenCV 5 与 `av` 的原生库冲突）。
+新机器建议按锁文件安装，密钥文件权限设为 `0600`：
+
+```bash
+python -m pip install -r requirements-lock.txt
+chmod 600 .env
+python main.py --require-production --serve
+```
+
+`--require-production` 会在启动前检查：访问 token、至少一个家人通知渠道、
+对应平台的回调签名、姿态模型文件、SQLite/日志路径可写、`.env` 权限。
+任一项不满足会以退出码 2 停止并列出脱敏原因；也可先单独运行
+`python tools/permission_check.py --require-production`，不会触碰硬件或云端。
+
 **第三阶段：真机部署与常驻运维验证**。
 
 网络摄像头：`VIDEO_SOURCE` 支持 `rtsp://`、`rtmp://`、`http(s)://`，走 FFmpeg 后端，
