@@ -64,60 +64,114 @@ class PoseEstimator:
         self.conf = float(cfg.get("conf", 0.5) if conf is None else conf)
         self._model = None
         self.loaded_path: Path | None = None  # 实际加载的权重（.pt 或 .mlpackage）
+        self.degraded = False
+        self.load_error: str | None = None
 
-    def _resolve_weights(self) -> Path:
-        """决定加载哪个权重文件：prefer_coreml 且 .mlpackage 存在 → CoreML。"""
+    def _candidate_weights(self) -> list[Path]:
         path = Path(self.weights)
         if not path.is_absolute():
             path = config.ROOT / path
+        candidates: list[Path] = []
         if self.prefer_coreml:
             pkg = path.with_suffix(".mlpackage")
             if pkg.exists():
-                return pkg
-        if not path.exists():
+                candidates.append(pkg)
+        if path.exists():
+            candidates.append(path)
+        if not candidates:
+            self.degraded = True
+            self.load_error = "weights_missing"
             raise RuntimeError(
                 f"姿态权重不存在：{path}。首次使用把 yolo26n-pose.pt 放到项目根目录"
                 "（或运行 tools/export_pose_coreml.py 自动下载并导出 CoreML）。")
-        return path
+        return candidates
 
     def _ensure_loaded(self) -> None:
         if self._model is not None:
             return
         from ultralytics import YOLO  # 重依赖，延迟到首次推理才导入
-        t0 = time.monotonic()
-        self.loaded_path = self._resolve_weights()
-        self._model = YOLO(str(self.loaded_path))
-        log.info("姿态模型就绪：%s（%.1fs 加载）",
-                 self.loaded_path.name, time.monotonic() - t0)
+        errors = []
+        for candidate in self._candidate_weights():
+            try:
+                t0 = time.monotonic()
+                model = YOLO(str(candidate))
+            except Exception as e:
+                errors.append(f"{candidate.suffix}: {type(e).__name__}")
+                continue
+            self._model = model
+            self.loaded_path = candidate
+            self.degraded = False
+            self.load_error = None
+            log.info("姿态模型就绪：%s（%.1fs 加载）",
+                     candidate.name, time.monotonic() - t0)
+            return
+        self.degraded = True
+        self.load_error = "; ".join(errors) or "load_failed"
+        raise RuntimeError(f"姿态模型加载失败（{self.load_error}）")
 
     @property
     def is_coreml(self) -> bool:
         return self.loaded_path is not None and \
             self.loaded_path.suffix == ".mlpackage"
 
-    def warmup(self) -> None:
-        """启动期预热：加载模型并跑一帧空白图完成 CoreML/PyTorch 算子编译，消除首帧卡顿。"""
+    def warmup(self) -> bool:
+        """预热并验证后端；CoreML 失败自动回退 .pt，全部失败进入 degraded。"""
+        dummy = np.zeros((64, 64, 3), dtype=np.uint8)
         try:
             self._ensure_loaded()
-            dummy = np.zeros((64, 64, 3), dtype=np.uint8)
             self._model.predict(dummy, conf=self.conf, verbose=False)
+            self.degraded = False
+            return True
         except Exception as e:
-            log.warning("姿态模型预热跳过：%s", e)
+            if self.is_coreml:
+                log.warning("CoreML 预热失败，回退 .pt：%s", type(e).__name__)
+                self._model = None
+                self.prefer_coreml = False
+                try:
+                    self._ensure_loaded()
+                    self._model.predict(dummy, conf=self.conf, verbose=False)
+                    self.degraded = False
+                    return True
+                except Exception as fallback:
+                    e = fallback
+            self.degraded = True
+            self.load_error = type(e).__name__
+            log.error("姿态模型不可用（%s）：%s", type(e).__name__, e)
+            return False
 
     def infer(self, frame_bgr: np.ndarray) -> list[PersonPose]:
-        """对一帧做姿态估计，返回 0..N 个人。任何推理异常都上抛给调用方记录。"""
-        self._ensure_loaded()
-        results = self._model.predict(frame_bgr, conf=self.conf, verbose=False)
-        r = results[0]
-        if r.boxes is None or r.keypoints is None or len(r.boxes) == 0:
-            return []
-        boxes = r.boxes.xyxy.cpu().numpy()
-        bconf = r.boxes.conf.cpu().numpy()
-        kxy = r.keypoints.xy.cpu().numpy()
-        if r.keypoints.conf is None:  # 个别权重不输出关键点置信度，按框置信度兜底
-            kconf = np.tile(bconf[:, None], (1, kxy.shape[1]))
-        else:
-            kconf = r.keypoints.conf.cpu().numpy()
-        return [PersonPose(bbox=boxes[i], keypoints=kxy[i],
-                           kconf=kconf[i], conf=float(bconf[i]))
-                for i in range(len(boxes))]
+        """姿态推理；失败标记 degraded 并上抛，由健康检查暴露。"""
+        try:
+            self._ensure_loaded()
+            results = self._model.predict(frame_bgr, conf=self.conf, verbose=False)
+            r = results[0]
+            if r.boxes is None or r.keypoints is None or len(r.boxes) == 0:
+                self.degraded = False
+                return []
+            boxes = r.boxes.xyxy.cpu().numpy()
+            bconf = r.boxes.conf.cpu().numpy()
+            kxy = r.keypoints.xy.cpu().numpy()
+            if r.keypoints.conf is None:  # 个别权重不输出关键点置信度，按框置信度兜底
+                kconf = np.tile(bconf[:, None], (1, kxy.shape[1]))
+            else:
+                kconf = r.keypoints.conf.cpu().numpy()
+            self.degraded = False
+            return [PersonPose(bbox=boxes[i], keypoints=kxy[i],
+                               kconf=kconf[i], conf=float(bconf[i]))
+                    for i in range(len(boxes))]
+        except Exception as e:
+            self.degraded = True
+            self.load_error = type(e).__name__
+            raise
+
+
+_CURRENT_POSE: PoseEstimator | None = None
+
+
+def set_current_pose(pose: PoseEstimator | None) -> None:
+    global _CURRENT_POSE
+    _CURRENT_POSE = pose
+
+
+def get_current_pose() -> PoseEstimator | None:
+    return _CURRENT_POSE

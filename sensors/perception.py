@@ -31,7 +31,7 @@ from core.state import StateStore, state as global_state
 from sensors.camera import Camera, set_current
 from sensors.motion import (MotionGate, MotionHistory, OccupancyTracker,
                             StillDetector)
-from sensors.pose import PersonPose, PoseEstimator
+from sensors.pose import PersonPose, PoseEstimator, set_current_pose
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +119,7 @@ async def run_perception(*, camera: Camera | None = None,
         pose_interval_s = float(
             config.settings().get("pose", {}).get("interval_s", 0.5))
     fall_cfg = config.settings().get("fall", {})
+    stale_s = float(config.settings().get("camera", {}).get("stale_s", 10.0))
     if spike_ratio is None:
         spike_ratio = float(fall_cfg.get("spike_ratio", 0.30))
     if spike_window_s is None:
@@ -134,6 +135,7 @@ async def run_perception(*, camera: Camera | None = None,
     own_camera = camera is None
 
     cam.start()
+    set_current_pose(pose)
     hist = PoseHistory()
     register_current(hist)  # 场景动作经 pose_history() 取数（M5）
     if own_camera:
@@ -153,16 +155,42 @@ async def run_perception(*, camera: Camera | None = None,
         if echo:
             print(time.strftime("%H:%M:%S"), msg, flush=True)
 
+    async def _set_camera_degraded(degraded: bool, age_s: float) -> None:
+        """帧过期只在边沿告警；恢复新帧后清除降级，不保留假正常状态。"""
+        if degraded == st.perception_degraded:
+            return
+        st.set("perception_degraded", degraded)
+        bus.publish_nowait({
+            "type": "sensor.health.degraded" if degraded else "sensor.health.recovered",
+            "ts": time.time(),
+            "payload": {"reason": "camera_stale" if degraded else "camera_recovered",
+                        "frame_age_s": round(age_s, 2)},
+        })
+        if degraded:
+            _log_line(f"⚠️ 摄像头超过 {age_s:.1f}s 无新帧，感知进入降级")
+            from skills import notify
+            await notify.send("摄像头长时间没有新画面，养老感知已降级，请检查设备与网络。",
+                              urgent=True)
+        else:
+            _log_line("摄像头恢复新帧，感知降级解除")
+
     try:
         while True:
             latest = cam.latest()
             if latest is None or latest[0] == last_ts:
                 if cam.eof:  # 文件回放结束
                     break
+                # 实时摄像头/网络流无新帧时必须显式降级；文件回放不用墙钟判 stale
+                if last_ts is not None and not getattr(cam, "source_is_file", True):
+                    age_s = time.time() - last_ts
+                    if age_s >= stale_s:
+                        await _set_camera_degraded(True, age_s)
                 await asyncio.sleep(poll_s)
                 if max_frames is not None and frames >= max_frames:
                     break
                 continue
+            if st.perception_degraded:
+                await _set_camera_degraded(False, 0.0)
             ts, frame = latest
             last_ts = ts
             frames += 1
@@ -245,6 +273,7 @@ async def run_perception(*, camera: Camera | None = None,
                 break
         await asyncio.sleep(0)  # 让尾帧 publish_nowait 派发的任务在清历史前启动
     finally:
+        set_current_pose(None)
         clear_current()
         if own_camera:
             set_current(None)

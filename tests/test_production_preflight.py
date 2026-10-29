@@ -16,6 +16,7 @@ def test_dependency_requirements_and_lock_are_reproducible():
     assert "opencv-python>=4.10,<5" in req
     assert "torchaudio==2.9.1" in req
     assert "httpx>=0.28,<1" in req
+    assert "av>=11,<16" in req
 
     lock_path = ROOT / "requirements-lock.txt"
     assert lock_path.exists(), "必须提交可复现安装的 requirements-lock.txt"

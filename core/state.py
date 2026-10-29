@@ -23,6 +23,7 @@ class StateStore:
             "morning": False, "noon": False, "evening": False}
         self.last_trigger: dict[str, float] = {}    # 每场景上次触发时间（冷却用）
         self.speaking: bool = False             # TTS 播报中（半双工互斥标志）
+        self.perception_degraded: bool = False  # 摄像头/感知退化：不能用“正常”掩盖
 
     def set(self, entity: str, value: Any) -> None:
         """更新一个字段并发布 state.<entity> 事件（payload 带 old/new）。"""

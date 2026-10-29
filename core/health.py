@@ -9,7 +9,8 @@ from __future__ import annotations
 import time
 
 
-def readiness(*, camera=None, log=None, now: float | None = None) -> tuple[bool, dict]:
+def readiness(*, camera=None, log=None, pose=None,
+              now: float | None = None) -> tuple[bool, dict]:
     """返回 (ready, snapshot)；snapshot 可直接写心跳或作为 /readyz 响应。"""
     ts = time.time() if now is None else float(now)
     checks: dict[str, bool] = {}
@@ -25,6 +26,15 @@ def readiness(*, camera=None, log=None, now: float | None = None) -> tuple[bool,
             cam = {"healthy": False, "reason": type(e).__name__}
         checks["camera"] = bool(cam.get("healthy"))
         details["camera"] = cam
+
+    if pose is not None:
+        degraded = bool(getattr(pose, "degraded", False))
+        checks["pose"] = not degraded
+        details["pose"] = {
+            "degraded": degraded,
+            "backend": (getattr(getattr(pose, "loaded_path", None), "suffix", None)),
+            "error": getattr(pose, "load_error", None),
+        }
 
     checks["db"] = True if log is None else bool(log.ping())
     details["db"] = {"ok": checks["db"]}

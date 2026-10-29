@@ -95,13 +95,15 @@ async def _heartbeat_loop(log: EventLog, voice_task=None,
     from core.health import readiness
     from core.heartbeat import write_heartbeat
     from sensors.camera import get_current
+    from sensors.pose import get_current_pose
 
     ops = config.settings().get("ops") or {}
     path = config.ROOT / str(ops.get("heartbeat_path", "data/heartbeat.json"))
     interval = max(1.0, float(ops.get("heartbeat_s", 10.0)))
     while not (stop_event is not None and stop_event.is_set()):
         try:
-            ready, snap = readiness(camera=get_current(), log=log)
+            ready, snap = readiness(camera=get_current(), log=log,
+                                pose=get_current_pose())
             snap.update({
                 "pid": os.getpid(),
                 "voice_alive": bool(voice_task is not None
@@ -155,6 +157,24 @@ async def _stop_ops_tasks(voice_stop: asyncio.Event, voice_task,
             pass
 
 
+async def _wait_server_started(server, server_task,
+                               timeout_s: float = 5.0) -> None:
+    """等待控制台真正监听；端口占用/启动异常不得伪装成成功。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
+        if server_task.done():
+            if server_task.cancelled():
+                raise RuntimeError("控制台启动失败：服务任务被取消")
+            exc = server_task.exception()
+            raise RuntimeError(
+                f"控制台启动失败：{type(exc).__name__}: {exc}") from exc
+        if server.started:
+            return
+        await asyncio.sleep(0.05)
+    raise RuntimeError("控制台启动失败：等待端口就绪超时")
+
+
 async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
     """M7 完整系统：感知回路 + 常驻语音回路 + 家人端控制台同 loop 常驻。
 
@@ -179,6 +199,13 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
     pose_est = PoseEstimator()
     print("⏳ 正在预热姿态模型（消除运行期首帧卡顿）……", flush=True)
     await asyncio.get_running_loop().run_in_executor(None, pose_est.warmup)
+    if pose_est.degraded:
+        detail = {"component": "pose", "error": pose_est.load_error}
+        log.log_event("health", "degraded", detail)
+        from skills import notify
+        await notify.send("感知降级：姿态模型不可用，跌倒/起身等视觉场景可能失效，请检查模型文件。",
+                          urgent=True)
+        print("⚠️ 姿态模型不可用：/readyz 将返回 503，视觉场景进入降级状态", flush=True)
 
     hub = PushHub()
     app = create_app(state=state, engine=engine, log=log, hub=hub)
@@ -188,10 +215,11 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
     uvicorn_cfg = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(uvicorn_cfg)
     server_task = asyncio.create_task(server.serve())
-    for _ in range(100):  # 等端口就绪再提示
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
+    try:
+        await _wait_server_started(server, server_task)
+    except Exception:
+        engine.unwire()
+        raise
 
     # 服务确实起来后再启动语音与心跳，避免端口占用等启动失败留下孤儿任务
     voice_stop, voice_task, heartbeat_task = await _start_ops_tasks(log)
@@ -273,10 +301,12 @@ async def _vla_serve_loop(engine: SceneEngine, log: EventLog) -> int:
     uvicorn_cfg = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(uvicorn_cfg)
     server_task = asyncio.create_task(server.serve())
-    for _ in range(100):
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
+    try:
+        await _wait_server_started(server, server_task)
+    except Exception:
+        engine.unwire()
+        cam.stop()
+        raise
 
     voice_stop, voice_task, heartbeat_task = await _start_ops_tasks(log)
 

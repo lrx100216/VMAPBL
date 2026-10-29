@@ -20,6 +20,7 @@ simpleeval>=1.0            # 条件表达式安全求值（禁止裸 eval）
 
 # ----- M3 语音链 -----
 faster-whisper>=1.1        # STT：small + int8 + zh，模型常驻（ctranslate2 有 macOS arm64 wheel）
+av>=11,<16                 # 与 OpenCV 对齐 FFmpeg 61，避免原生库 ABI 冲突
 silero-vad[onnx-cpu]>=5.1  # VAD：官方包自带约 2MB ONNX 模型；必须带 onnx-cpu extra 才会装 onnxruntime
 scipy>=1.14                # 48k→16k 重采样（scipy.signal.resample_poly(x, 1, 3)）
 

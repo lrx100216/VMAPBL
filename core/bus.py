@@ -18,6 +18,7 @@ Event = dict  # {"type": str, "ts": float, "payload": dict}
 Handler = Callable[[Event], "Awaitable[None] | None"]
 
 _subs: list[tuple[str, Handler]] = []
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 
 def subscribe(type_pattern: str, handler: Handler) -> None:
@@ -61,8 +62,15 @@ def publish_nowait(event: Event) -> None:
         # 没有事件循环（如纯同步的单元测试）：丢弃并提示，而不是静默失败
         print(f"[bus] 警告：无运行中的事件循环，事件 {event.get('type')} 未发布")
         return
-    loop.create_task(publish(event))
+    task = loop.create_task(publish(event))
+    _BACKGROUND_TASKS.add(task)  # 强引用防止任务在完成前被 GC
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
 
+
+async def drain() -> None:
+    """等待当前 nowait 事件派发完成；停服与测试不再靠 sleep(0) 猜时序。"""
+    while _BACKGROUND_TASKS:
+        await asyncio.gather(*list(_BACKGROUND_TASKS), return_exceptions=True)
 
 def clear_subscriptions() -> None:
     """清空全部订阅（仅测试用）。"""

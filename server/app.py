@@ -58,6 +58,7 @@ def state_snapshot(state: StateStore) -> dict:
         "occupancy": bool(state.occupancy),
         "is_still": bool(state.is_still),
         "speaking": bool(state.speaking),
+        "perception_degraded": bool(state.perception_degraded),
         "last_motion_ts": float(state.last_motion_ts),
         "medication_taken": dict(state.medication_taken),
         "last_trigger": dict(state.last_trigger),
@@ -101,8 +102,10 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
         """就绪探针：视频帧新鲜且数据库可写才 200；否则 503 并给出逐项原因。"""
         from core.health import readiness
         from sensors.camera import get_current
+        from sensors.pose import get_current_pose
         from skills.notify import get_webhook_urls
-        ready, snap = readiness(camera=get_current(), log=log)
+        ready, snap = readiness(camera=get_current(), log=log,
+                                pose=get_current_pose())
         snap["notify_channels"] = sum(1 for u in get_webhook_urls().values() if u)
         return JSONResponse(snap, status_code=200 if ready else 503)
 
@@ -212,6 +215,15 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
         from skills import vision
         edge = max(80, min(max_edge, 960))   # 钳制范围，拒绝非法参数
         cam = get_current()
+        if cam is not None and cam.started:
+            from core import config
+            stale_s = float(config.settings().get("camera", {}).get("stale_s", 10.0))
+            latest = cam.latest()
+            if latest is not None and time.time() - latest[0] > stale_s:
+                return JSONResponse({
+                    "ok": False, "stale": True, "reason": "画面已过期",
+                    "ts": latest[0],
+                }, status_code=503)
         if cam is not None and cam.started and edge == 480:
             cached = cam.latest_jpeg()
             if cached is not None:

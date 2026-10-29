@@ -330,7 +330,7 @@ curl -s -H "Authorization: Bearer 你的口令" http://127.0.0.1:8321/api/state
 **生产预检与依赖锁（2026-10-29）**。
 
 直接依赖范围见 `requirements.txt`，当前验证过的完整环境固定在
-`requirements-lock.txt`（OpenCV 4.x，避免 OpenCV 5 与 `av` 的原生库冲突）。
+`requirements-lock.txt`（OpenCV 4.x + `av<16`，对齐 FFmpeg 61，降低原生库 ABI 冲突）。
 新机器建议按锁文件安装，密钥文件权限设为 `0600`：
 
 ```bash
@@ -343,6 +343,17 @@ python main.py --require-production --serve
 对应平台的回调签名、姿态模型文件、SQLite/日志路径可写、`.env` 权限。
 任一项不满足会以退出码 2 停止并列出脱敏原因；也可先单独运行
 `python tools/permission_check.py --require-production`，不会触碰硬件或云端。
+
+**P1-1 健康降级**。
+
+- 姿态模型支持 CoreML 加载/预热失败后回退 `.pt`，全部失败进入 `degraded`；
+  `/readyz` 将模型状态纳入就绪判定，启动时写降级事件并尝试通知家人。
+- 控制台绑定端口失败不再打印“启动成功”；classic/VLA 都先确认服务真正监听，
+  再启动语音与心跳。
+- 实时摄像头/网络流超过 `camera.stale_s` 无新帧时设置 `perception_degraded`、
+  发布 `sensor.health.degraded` 并告警；恢复新帧后自动解除。`/api/frame` 对陈旧
+  画面返回 503，不再用旧图伪装实时。
+- `bus.publish_nowait` 保留任务强引用，新增 `await bus.drain()` 用于停服和测试排空。
 
 **第三阶段：真机部署与常驻运维验证**。
 
