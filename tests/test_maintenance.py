@@ -55,6 +55,19 @@ def test_sqlite_backup_is_readable_and_contains_data(tmp_path):
     conn.close()
 
 
+def test_sqlite_backup_replaces_existing_file(tmp_path):
+    source = EventLog(tmp_path / "source.db")
+    source.log_event("fall", "trigger", {})
+    backup = tmp_path / "backup" / "butler-latest.db"
+    backup.parent.mkdir()
+    backup.write_text("old", encoding="utf-8")
+    source.backup_to(backup)   # 已存在的每日备份必须能覆盖，否则心跳维护会失败
+    source.close()
+    conn = sqlite3.connect(backup)
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    conn.close()
+
+
 def test_logrotate_asset_exists_and_covers_runtime_logs():
     path = ROOT / "deploy" / "newsyslog.butler.conf"
     assert path.exists()

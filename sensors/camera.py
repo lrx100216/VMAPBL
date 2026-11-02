@@ -11,9 +11,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from urllib.parse import urlsplit, urlunsplit
 
 import cv2
@@ -40,6 +42,24 @@ def safe_source(source: "int | str") -> str:
         return urlunsplit((parts.scheme, f"{host}{port}", parts.path, "", ""))
     except Exception:
         return "<stream>"
+
+
+_stderr_lock = threading.Lock()
+
+
+@contextmanager
+def _muted_native_stderr():
+    """屏蔽 FFmpeg/OpenCV 原生 stderr：底层错误可能带 RTSP 账号密码。"""
+    with _stderr_lock:
+        saved = os.dup(2)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, 2)
+            yield
+        finally:
+            os.dup2(saved, 2)
+            os.close(devnull)
+            os.close(saved)
 
 
 class Camera:
@@ -97,8 +117,17 @@ class Camera:
 
     def _open_stream_capture(self) -> cv2.VideoCapture:
         """打开网络流：不指定 AVFoundation 后端，并尽量只缓冲最新一帧。"""
-        cap = cv2.VideoCapture(self.source)
-        if not cap.isOpened():
+        opened = False
+        try:
+            # FFmpeg 在构造与 isOpened 阶段都可能打印完整 RTSP 地址
+            with _muted_native_stderr():
+                cap = cv2.VideoCapture(self.source)
+                opened = bool(cap.isOpened())
+        except Exception:
+            raise RuntimeError(
+                f"网络视频源打不开：{safe_source(self.source)!r}。"
+                "请检查地址、账号密码与网络。") from None
+        if not opened:
             raise RuntimeError(
                 f"网络视频源打不开：{safe_source(self.source)!r}。"
                 "请检查地址、账号密码与网络。")

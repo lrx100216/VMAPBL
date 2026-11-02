@@ -28,6 +28,10 @@ import os
 import sys
 import time
 
+# 必须在导入 cv2/OpenCV 前设置：底层 FFmpeg 的 RTSP 日志会带账号密码
+os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
+os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
+
 from actions import SKILLS
 from core import config
 from core.log import EventLog, set_default
@@ -187,6 +191,41 @@ async def _wait_server_started(server, server_task,
     raise RuntimeError("控制台启动失败：等待端口就绪超时")
 
 
+async def _supervise_perception(run_fn, log: EventLog,
+                                retry_s: float = 10.0,
+                                stop_event: asyncio.Event | None = None) -> str:
+    """摄像头/感知失败时保持控制台与告警在线，按间隔重试而不是整个进程退出。"""
+    degraded_logged = False
+    while not (stop_event is not None and stop_event.is_set()):
+        try:
+            await run_fn()
+            return "ended"
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if not degraded_logged:
+                degraded_logged = True
+                try:
+                    state.set("perception_degraded", True)
+                except Exception:
+                    pass
+                detail = {"component": "perception", "error": type(e).__name__}
+                try:
+                    log.log_event("health", "degraded", detail)
+                except Exception:
+                    pass
+                print(f"[perception] 感知启动失败（{type(e).__name__}），"
+                      f"{retry_s:.0f} 秒后重试；控制台与告警继续运行", flush=True)
+            if stop_event is None:
+                await asyncio.sleep(max(0.0, retry_s))
+            else:
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=max(0.01, retry_s))
+                except asyncio.TimeoutError:
+                    pass
+    return "stopped"
+
+
 async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
     """M7 完整系统：感知回路 + 常驻语音回路 + 家人端控制台同 loop 常驻。
 
@@ -241,7 +280,10 @@ async def _serve_loop(engine: SceneEngine, log: EventLog) -> int:
           "（老人可直接说话；安全确认优先抢占麦克风）")
     print("   感知回路与场景触发器已在线，Ctrl+C 退出")
     try:
-        await run_perception(pose=pose_est)
+        retry_s = float(_cfg.settings().get("camera", {}).get(
+            "perception_retry_s", 10.0))
+        await _supervise_perception(
+            lambda: run_perception(pose=pose_est), log, retry_s=retry_s)
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n服务退出。")
     finally:
@@ -336,8 +378,12 @@ async def _vla_serve_loop(engine: SceneEngine, log: EventLog) -> int:
             print(f"   ↳ 动作执行: {act_res.get('type')} -> {act_res.get('status')}")
 
     try:
-        stats = await run_sentinel(camera=cam, on_event_callback=on_vla_event, sentinel=sentinel, stop_event=stop_ev)
-        print(f"\n哨兵性能统计: {stats}")
+        retry_s = float(config.settings().get("camera", {}).get(
+            "perception_retry_s", 10.0))
+        await _supervise_perception(
+            lambda: run_sentinel(camera=cam, on_event_callback=on_vla_event,
+                                 sentinel=sentinel, stop_event=stop_ev),
+            log, retry_s=retry_s, stop_event=stop_ev)
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\nVLA 服务退出。")
     finally:

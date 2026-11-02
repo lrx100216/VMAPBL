@@ -3,6 +3,11 @@
 set -u
 
 APP_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+PROJECT_LINK="$(dirname "$0")/../Resources/project"
+if [ -e "$PROJECT_LINK" ]; then
+    # 从 /Applications 或其他位置启动时，仍指向原项目目录
+    APP_ROOT="$(cd "$PROJECT_LINK" && pwd)"
+fi
 CONSOLE_URL="http://127.0.0.1:8321/"
 HEALTH_URL="http://127.0.0.1:8321/healthz"
 PYTHON="$APP_ROOT/.venv/bin/python"

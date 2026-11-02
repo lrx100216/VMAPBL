@@ -21,6 +21,7 @@ _SCENE_NAMES = {
     "msg_to_family": "老人留言",
     "photo_ocr": "文字识别",
     "notify": "通知",
+    "health": "健康状态",
 }
 
 _DETAIL_KEYS = {
@@ -179,7 +180,16 @@ def dashboard_timeline(log, limit: int = 20) -> list[dict]:
         return []
     limit = max(1, min(int(limit), 100))
     items = []
-    for event in log.recent(limit=limit):
+    previous_health = False
+    for event in log.recent(limit=limit * 3):
+        scene_id = str(event.get("scene_id", "system"))
+        kind = str(event.get("kind", "event"))
+        if scene_id == "health" and kind == "degraded":
+            if previous_health:
+                continue  # 连续降级只保留一条，避免时间线刷屏
+            previous_health = True
+        else:
+            previous_health = False
         scene_id = str(event.get("scene_id", "system"))
         kind = str(event.get("kind", "event"))
         detail = event.get("detail") or {}
@@ -199,4 +209,6 @@ def dashboard_timeline(log, limit: int = 20) -> list[dict]:
             "title": title,
             "detail": _safe_detail(detail),
         })
+        if len(items) >= limit:
+            break
     return items

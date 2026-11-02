@@ -15,6 +15,7 @@ camera:
   ring_jpeg_quality: 60
   reconnect_s: 2.0         # RTSP/HTTP 网络流断线后的重连间隔
   start_attempts: 3        # 启动阶段允许瞬时失败的重试次数
+  perception_retry_s: 10.0 # 摄像头持续不可达时，保留控制台并重试感知的间隔
   stale_s: 10.0            # 超过多少秒没有新帧算“视频流不健康”（/readyz 与看门狗）
 motion:
   trigger_ratio: 0.15            # MOG2 前景像素占比 ≥ 此值 → 判定有运动（触发阈值）
@@ -186,3 +187,4 @@ roi:     # M4 标定工具写入：door_inside / door_outside / bed 等多边形
     - 340
   - - 175
     - 340
+disabled_scenes: []

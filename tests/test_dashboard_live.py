@@ -76,6 +76,19 @@ def test_summary_and_timeline_derive_from_events(tmp_path):
         log.close()
 
 
+def test_timeline_collapses_consecutive_health_degraded(tmp_path):
+    log = EventLog(tmp_path / "timeline.db")
+    try:
+        for _ in range(3):
+            log.log_event("health", "degraded", {"component": "perception"})
+        log.log_event("fall", "trigger", {})
+        timeline = dashboard_timeline(log, limit=10)
+        assert sum(1 for e in timeline if e["scene_id"] == "health") == 1
+        assert timeline[0]["scene_id"] == "fall"
+    finally:
+        log.close()
+
+
 async def test_home_live_mode_uses_real_apis_and_disables_unsupported_actions(tmp_path):
     store = StateStore()
     log = EventLog(tmp_path / "dashboard.db")

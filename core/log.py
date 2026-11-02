@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -328,11 +329,15 @@ class EventLog:
         return int(deleted)
 
     def backup_to(self, path: str | Path) -> None:
-        """SQLite 在线备份；调用方负责定期执行和保留策略。"""
+        """SQLite 在线备份；先写临时文件再原子替换，允许覆盖昨日备份。"""
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
         with self._lock:
-            self._conn.execute("VACUUM INTO ?", (str(target),))
+            if tmp.exists():
+                tmp.unlink()
+            self._conn.execute("VACUUM INTO ?", (str(tmp),))
+        os.replace(tmp, target)
 
     def close(self) -> None:
         with self._lock:

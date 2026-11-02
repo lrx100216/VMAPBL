@@ -26,6 +26,13 @@ def test_launcher_is_executable_and_valid_zsh():
     assert result.returncode == 0, result.stderr
 
 
+def test_launcher_resolves_project_link_when_app_is_moved():
+    # 仓库内的 .app 不提交绝对路径链接；安装到 /Applications 时创建该链接
+    text = LAUNCHER.read_text(encoding="utf-8")
+    assert 'PROJECT_LINK="$(dirname "$0")/../Resources/project"' in text
+    assert 'APP_ROOT="$(cd "$PROJECT_LINK" && pwd)"' in text
+
+
 def test_launcher_uses_project_relative_paths_and_opens_console():
     text = LAUNCHER.read_text(encoding="utf-8")
     assert "/Users/liuruixuan" not in text
