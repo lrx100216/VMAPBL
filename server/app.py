@@ -113,6 +113,67 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
     async def api_state() -> dict:
         return state_snapshot(state)
 
+    @app.get("/api/dashboard/summary")
+    async def api_dashboard_summary() -> dict:
+        """首页真实只读摘要；无法证明的字段返回 null/unknown。"""
+        from sensors.camera import get_current
+        from sensors.pose import get_current_pose
+        from server.dashboard import dashboard_summary, medication_slots
+        return dashboard_summary(
+            state=state, log=log, camera=get_current(), pose=get_current_pose(),
+            scheduled_slots=medication_slots(engine))
+
+    @app.get("/api/dashboard/timeline")
+    async def api_dashboard_timeline(limit: int = 20) -> list[dict]:
+        from server.dashboard import dashboard_timeline
+        return dashboard_timeline(log, limit=limit)
+
+    @app.get("/api/rules")
+    async def api_rules() -> list[dict]:
+        from server.rules import rule_view
+        return [rule_view(scene, engine.is_scene_enabled(scene.id))
+                for scene in engine.scenes.values()]
+
+    @app.patch("/api/rules/{scene_id}")
+    async def api_rule_toggle(scene_id: str, body: dict = Body(...)) -> dict:
+        """真实启停场景并持久化 disabled_scenes；不是只改前端状态。"""
+        from core import config
+        from server.rules import rule_view
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=422, detail="enabled 必须是布尔值")
+        try:
+            engine.set_scene_enabled(scene_id, enabled)
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        disabled = {scene.id for scene in engine.scenes.values()
+                    if not engine.is_scene_enabled(scene.id)}
+        try:
+            config.save_disabled_scenes(disabled)
+        except Exception as e:
+            # 回滚运行时状态，避免“界面已改但重启后行为不同”被隐藏
+            engine.set_scene_enabled(scene_id, not enabled)
+            raise HTTPException(status_code=500,
+                                detail=f"规则持久化失败：{type(e).__name__}")
+        return rule_view(engine.scenes[scene_id], enabled)
+
+    @app.get("/api/drugs")
+    async def api_drugs() -> list[dict]:
+        return log.list_medications()
+
+    @app.post("/api/drugs")
+    async def api_drug_save(body: dict = Body(...)) -> dict:
+        name = str(body.get("name") or "").strip()
+        if not name or len(name) > 80:
+            raise HTTPException(status_code=422, detail="药品名称必填且不超过 80 字")
+        stock, days = body.get("stock"), body.get("days")
+        if isinstance(stock, bool) or not isinstance(stock, int) or not 0 <= stock <= 100000:
+            raise HTTPException(status_code=422, detail="余量必须是 0–100000 的整数")
+        if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 365:
+            raise HTTPException(status_code=422, detail="提前补药天数必须是 1–365 的整数")
+        log.upsert_medication(name, stock, days)
+        return {"ok": True, "drug": {"name": name, "stock": stock, "days": days}}
+
     @app.get("/api/messages")
     async def api_messages(limit: int = 30) -> list[dict]:
         return log.list_messages(limit=max(1, min(limit, 200)))
@@ -129,6 +190,12 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
         ctx = {"text": str(body.get("text", ""))} if body.get("text") else None
         if ctx:
             _validate_message_text(ctx["text"])
+        scene = engine.scenes.get(scene_id)
+        if scene is not None and scene.background:
+            task_id = engine.submit(scene_id, ctx)
+            return JSONResponse({
+                "scene_id": scene_id, "background": True, "task_id": task_id,
+            }, status_code=202)
         try:
             ran = await engine.trigger(scene_id, ctx=ctx)
         except Exception as e:
@@ -347,6 +414,7 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
         await ws.accept()
         q = hub.register()
         recv_task = asyncio.create_task(ws.receive())
+        get_task = None
         try:
             await ws.send_json({"type": "hello", "state": state_snapshot(state)})
             while True:
@@ -371,6 +439,12 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
             pass
         finally:
             hub.unregister(q)
+            if get_task is not None and not get_task.done():
+                get_task.cancel()
+                try:
+                    await get_task
+                except (asyncio.CancelledError, WebSocketDisconnect):
+                    pass
             if not recv_task.done():
                 recv_task.cancel()
                 try:

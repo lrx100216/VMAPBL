@@ -25,6 +25,9 @@ class _FakeCap:
     def release(self):
         self.released = True
 
+    def read(self):
+        return False, None
+
 
 def test_source_kind_detection():
     assert cam_mod.Camera("rtsp://192.168.1.10/stream").source_is_stream
@@ -86,6 +89,26 @@ def test_stream_reconnect_failure_is_retryable(monkeypatch):
     cam._reconnect()
     assert cam._cap is None            # 下一轮循环会继续重连
     assert cam.last_error == "RuntimeError"
+
+
+def test_stream_start_retries_transient_open_failure(monkeypatch):
+    """启动时偶发一次 RTSP 失败不能直接拖垮整个服务。"""
+    attempts = []
+
+    def fake_video_capture(*args, **kwargs):
+        attempts.append(args)
+        return _FakeCap(opened=len(attempts) > 1)
+
+    monkeypatch.setattr(cam_mod.cv2, "VideoCapture", fake_video_capture)
+    monkeypatch.setattr(cam_mod.config, "settings", lambda: {
+        "camera": {"reconnect_s": 0, "start_attempts": 3}})
+    cam = cam_mod.Camera("rtsp://cam.local/stream")
+    cam.start()
+    try:
+        assert len(attempts) == 2
+        assert cam.started is True
+    finally:
+        cam.stop()
 
 
 def test_camera_health_snapshot_reports_staleness():

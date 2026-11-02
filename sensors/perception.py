@@ -134,7 +134,7 @@ async def run_perception(*, camera: Camera | None = None,
         keep_s=float(fall_cfg.get("motion_keep_s", 30.0)))
     own_camera = camera is None
 
-    cam.start()
+    await asyncio.get_running_loop().run_in_executor(None, cam.start)
     set_current_pose(pose)
     hist = PoseHistory()
     register_current(hist)  # 场景动作经 pose_history() 取数（M5）

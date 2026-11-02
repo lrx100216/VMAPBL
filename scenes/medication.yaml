@@ -23,4 +23,5 @@ action:
     args:
       slot: morning
 mode: single
+background: true             # 一小时观察窗后台运行，不阻塞定时循环和 HTTP 触发
 priority: 0                 # 普通场景：跌倒 100 > 未起床 90 > 起身 80 > 其他 0

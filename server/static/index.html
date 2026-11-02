@@ -95,7 +95,7 @@ input[type=range]{width:100%}
 </head>
 <body>
 <header class="topbar">
-  <div class="brand">家庭守护仪表盘 <span class="badge">演示数据</span></div>
+  <div class="brand">家庭守护仪表盘 <span class="badge" id="dataBadge">演示数据</span></div>
   <nav class="tabs">
     <button class="tab active" data-page="dashboard">仪表盘</button>
     <button class="tab" data-page="reminders">智能提醒</button>
@@ -111,11 +111,11 @@ input[type=range]{width:100%}
       <div class="elder">
         <div class="avatar" aria-hidden="true">王</div>
         <div>
-          <h1>王奶奶 <span class="age">85 岁 · 独居</span></h1>
+          <h1><span id="elderName">王奶奶</span> <span class="age" id="elderMeta">85 岁 · 独居</span></h1>
           <div class="status-row">
             <span class="pill ok" id="presence">● 在家</span>
-            <span class="pill calm">状态良好</span>
-            <span class="muted">更新于 2 分钟前</span>
+            <span class="pill calm" id="safetyTag">状态良好</span>
+            <span class="muted" id="updatedAt">更新于 2 分钟前</span>
           </div>
         </div>
       </div>
@@ -125,24 +125,24 @@ input[type=range]{width:100%}
     <div class="cards">
       <article class="card">
         <h2>① 今日安全摘要</h2>
-        <div class="metric"><span>起床时间</span><b>07:12</b></div>
-        <div class="metric"><span>活动时长</span><b>4 小时 20 分</b></div>
-        <div class="metric"><span>异常情况</span><b class="ok-text">无异常</b></div>
+        <div class="metric"><span>起床时间</span><b id="wakeTime">07:12</b></div>
+        <div class="metric"><span>活动时长</span><b id="activityTime">4 小时 20 分</b></div>
+        <div class="metric"><span>异常情况</span><b class="ok-text" id="abnormalText">无异常</b></div>
       </article>
 
       <article class="card">
         <h2>② 用药状态</h2>
-        <div class="metric"><span>今日已确认</span><b class="big">2 / 3 次</b></div>
-        <div class="progress" aria-label="今日服药进度"><i style="width:66%"></i></div>
-        <div class="muted">08:00 已确认 · 13:00 已确认 · 19:00 待确认</div>
-        <div class="warn-text">⚠ 19:00 还有一次未确认，若持续未确认将按升级流程通知家人。</div>
+        <div class="metric"><span>今日已确认</span><b class="big" id="medCount">2 / 3 次</b></div>
+        <div class="progress" aria-label="今日服药进度"><i id="medProgress" style="width:66%"></i></div>
+        <div class="muted" id="medDetail">08:00 已确认 · 13:00 已确认 · 19:00 待确认</div>
+        <div class="warn-text" id="medWarning">⚠ 19:00 还有一次未确认，若持续未确认将按升级流程通知家人。</div>
       </article>
 
       <article class="card">
         <h2>③ 设备状态</h2>
-        <div class="device"><span><i class="dot"></i>摄像头</span><b>1 / 1 在线</b></div>
-        <div class="device"><span><i class="dot"></i>音箱</span><b>1 / 1 在线</b></div>
-        <div class="device"><span><i class="dot off"></i>传感器</span><b>2 / 3 在线</b></div>
+        <div class="device"><span><i class="dot"></i>摄像头</span><b id="cameraStatus">1 / 1 在线</b></div>
+        <div class="device"><span><i class="dot"></i>音箱</span><b id="speakerStatus">1 / 1 在线</b></div>
+        <div class="device"><span><i class="dot off"></i>传感器</span><b id="sensorStatus">2 / 3 在线</b></div>
       </article>
     </div>
 
@@ -257,6 +257,7 @@ input[type=range]{width:100%}
 <script>
 /* ---------- 工具 ---------- */
 const $ = (id) => document.getElementById(id);
+const DEMO = new URLSearchParams(location.search).get("demo") === "1";
 function toast(msg) {
   const t = $("toast");
   t.textContent = msg;
@@ -290,33 +291,104 @@ const events = [
   { time: "07:12", icon: "✅", title: "已起床",
     detail: "07:12 检测到老人离床活动，作息正常。08:30 作息守护规则未触发家人通知。" },
 ];
-$("timeline").innerHTML = events.map((e, i) => `
-  <li class="event" data-i="${i}">
-    <button class="event-head">
-      <span class="event-time">${e.time}</span>
-      <span class="event-title">${e.icon} ${e.title}</span>
-      <span class="event-chevron">详情 ▾</span>
-    </button>
-    <div class="event-detail">${e.detail}</div>
-  </li>`).join("");
-document.querySelectorAll(".event-head").forEach(btn => {
-  btn.addEventListener("click", () => btn.closest(".event").classList.toggle("open"));
-});
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[ch]));
+}
+function fmtTime(ts) {
+  return new Date(Number(ts) * 1000).toLocaleTimeString("zh-CN", {
+    hour: "2-digit", minute: "2-digit", hour12: false
+  });
+}
+function renderTimeline(items) {
+  $("timeline").innerHTML = items.length ? items.map((e, i) => `
+    <li class="event" data-i="${i}">
+      <button class="event-head">
+        <span class="event-time">${escapeHtml(e.time)}</span>
+        <span class="event-title">${e.icon || ""} ${escapeHtml(e.title)}</span>
+        <span class="event-chevron">详情 ▾</span>
+      </button>
+      <div class="event-detail">${escapeHtml(e.detail)}</div>
+    </li>`).join("") : `<li class="muted" style="padding:12px 4px">暂无真实事件</li>`;
+  document.querySelectorAll(".event-head").forEach(btn => {
+    btn.addEventListener("click", () => btn.closest(".event").classList.toggle("open"));
+  });
+}
+renderTimeline(events);
 
-/* ---------- 快捷操作（mock） ---------- */
+/* ---------- 鉴权与真实 API ---------- */
+const AUTH_TOKEN = new URLSearchParams(location.search).get("token")
+  || sessionStorage.getItem("BUTLER_TOKEN") || "";
+function authHeaders(extra) {
+  return AUTH_TOKEN ? { ...extra, Authorization: `Bearer ${AUTH_TOKEN}` } : extra;
+}
+function requireAuth() {
+  const t = prompt("请输入家人端访问口令（BUTLER_TOKEN）");
+  if (t) { sessionStorage.setItem("BUTLER_TOKEN", t.trim()); location.reload(); }
+}
+async function getJSON(url) {
+  const r = await fetch(url, { headers: authHeaders({}) });
+  if (r.status === 401) { requireAuth(); throw new Error("未授权"); }
+  if (!r.ok) throw new Error(`${url} → ${r.status}`);
+  return r.json();
+}
+async function postJSON(url, body) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: body ? JSON.stringify(body) : "{}",
+  });
+  if (r.status === 401) { requireAuth(); throw new Error("未授权"); }
+  if (!r.ok) throw new Error(`${url} → ${r.status}`);
+  return r.json();
+}
+async function patchJSON(url, body) {
+  const r = await fetch(url, {
+    method: "PATCH",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body || {}),
+  });
+  if (r.status === 401) { requireAuth(); throw new Error("未授权"); }
+  if (!r.ok) throw new Error(`${url} → ${r.status}`);
+  return r.json();
+}
+async function deleteJSON(url) {
+  const r = await fetch(url, { method: "DELETE", headers: authHeaders({}) });
+  if (r.status === 401) { requireAuth(); throw new Error("未授权"); }
+  if (!r.ok) throw new Error(`${url} → ${r.status}`);
+  return r.json();
+}
+
+/* ---------- 快捷操作：live 走真实留言，demo 保留演示 ---------- */
+async function sendFamilyMessage(text, demoMessage) {
+  if (DEMO) { toast(demoMessage); return true; }
+  try {
+    const result = await postJSON("/api/msg_to_elder", { text });
+    if (result.ok) { toast("留言已接收，等待老人端播报"); return true; }
+    toast("留言未被接受"); return false;
+  } catch (e) {
+    toast("发送失败，请检查服务与鉴权"); return false;
+  }
+}
 $("voiceBtn").addEventListener("click", () => $("voiceModal").classList.remove("hidden"));
-$("sendVoice").addEventListener("click", () => {
+$("sendVoice").addEventListener("click", async () => {
   const text = $("voiceText").value.trim();
   if (!text) { toast("先写一句要对老人说的话"); return; }
-  $("voiceModal").classList.add("hidden");
-  $("voiceText").value = "";
-  toast("语音已发送，老人端将播报（演示）");
+  if (await sendFamilyMessage(text, "语音已发送，老人端将播报（演示）")) {
+    $("voiceModal").classList.add("hidden");
+    $("voiceText").value = "";
+  }
 });
-$("videoBtn").addEventListener("click", () => toast("视频通话邀请已发出（演示）"));
-$("calmBtn").addEventListener("click", () => toast("已自动播报：我很好，别担心"));
+$("videoBtn").addEventListener("click", () => {
+  toast(DEMO ? "视频通话邀请已发出（演示）" : "视频通话尚未接入");
+});
+$("calmBtn").addEventListener("click", () => {
+  sendFamilyMessage("我很好，别担心", "已自动播报：我很好，别担心（演示）");
+});
 
-/* ---------- 提醒规则（mock） ---------- */
-const rules = [
+/* ---------- 提醒规则（demo 数据；live 由 /api/rules 替换） ---------- */
+let rules = [
   { id: "keys", name: "出门带钥匙", enabled: true, ai: "vision",
     trigger: "检测到开门且老人穿戴整齐 → 音箱播报",
     phrase: "带钥匙了吗？外面注意安全。" },
@@ -341,11 +413,26 @@ function renderRules() {
       <label class="switch"><input type="checkbox" data-toggle="${r.id}" ${r.enabled ? "checked" : ""}><i></i></label>
     </div>`).join("");
   document.querySelectorAll("[data-toggle]").forEach(input => {
-    input.addEventListener("change", () => {
+    input.addEventListener("change", async () => {
       const rule = rules.find(r => r.id === input.dataset.toggle);
-      rule.enabled = input.checked;
-      renderRules();
-      toast(`${rule.name} 已${rule.enabled ? "启用" : "停用"}`);
+      const previous = rule.enabled;
+      if (DEMO) {
+        rule.enabled = input.checked;
+        renderRules();
+        toast(`${rule.name} 已${rule.enabled ? "启用" : "停用"}（演示）`);
+        return;
+      }
+      input.checked = previous;  // 等真实服务端确认后再改变显示
+      try {
+        const saved = await patchJSON(`/api/rules/${encodeURIComponent(rule.id)}`, {
+          enabled: !previous,
+        });
+        rule.enabled = saved.enabled;
+        renderRules();
+        toast(`${rule.name} 已${rule.enabled ? "启用" : "停用"}`);
+      } catch (e) {
+        toast("规则保存失败，未改变运行状态");
+      }
     });
   });
   document.querySelectorAll("[data-open]").forEach(el => {
@@ -362,6 +449,12 @@ function upgradeText() {
 
 function openRule(id) {
   currentRule = rules.find(r => r.id === id);
+  const editable = DEMO;  // live 目前只开放真实启停，未接入的编辑不伪装可写
+  $("rulePhrase").disabled = !editable;
+  $("saveRule").disabled = !editable;
+  $("upgradeRange").disabled = !editable;
+  $("upgradeStep").disabled = !editable;
+  document.querySelectorAll("#aiModes .btn").forEach(b => { b.disabled = !editable; });
   $("ruleTitle").textContent = currentRule.name;
   $("ruleTrigger").textContent = currentRule.trigger;
   $("rulePhrase").value = currentRule.phrase;
@@ -394,6 +487,7 @@ $("dialectBtn").addEventListener("click", () => {
   toast("方言话术已保存（演示）");
 });
 $("saveRule").addEventListener("click", () => {
+  if (!DEMO) { toast("详细规则编辑尚未接入，当前仅支持启停"); return; }
   if (!currentRule) return;
   currentRule.phrase = $("rulePhrase").value.trim() || currentRule.phrase;
   $("ruleModal").classList.add("hidden");
@@ -401,12 +495,37 @@ $("saveRule").addEventListener("click", () => {
   toast(`${currentRule.name} 已保存（演示）`);
 });
 
+async function loadRules() {
+  if (DEMO) return;
+  $("ruleList").innerHTML = `<div class="muted">正在加载真实规则…</div>`;
+  try {
+    rules = await getJSON("/api/rules");
+    renderRules();
+  } catch (e) {
+    $("ruleList").innerHTML = `<div class="warn-text">真实规则加载失败</div>`;
+  }
+}
+
 /* ---------- 药品管理（mock） ---------- */
 const drugs = [
   { name: "阿托伐他汀钙片", stock: 12, days: 3 },
   { name: "苯磺酸氨氯地平片", stock: 4, days: 3 },
 ];
-function renderDrugs() {
+async function renderDrugs() {
+  if (!DEMO) {
+    $("drugList").innerHTML = `<div class="muted">正在读取药品记录…</div>`;
+    try {
+      const actual = await getJSON("/api/drugs");
+      $("drugList").innerHTML = actual.length ? actual.map(d => {
+        const low = d.stock <= d.days * 2;
+        return `<div class="drug"><span>${escapeHtml(d.name)}</span>
+          <span class="${low ? "warn-text" : "muted"}" style="padding:2px 8px">余量 ${d.stock} 片${low ? " · 该补药了" : ""}</span></div>`;
+      }).join("") : `<div class="muted">暂无药品记录</div>`;
+    } catch (e) {
+      $("drugList").innerHTML = `<div class="warn-text">药品记录读取失败</div>`;
+    }
+    return;
+  }
   $("drugList").innerHTML = drugs.map(d => {
     const low = d.stock <= d.days * 2;
     return `<div class="drug"><span>${d.name}</span>
@@ -415,23 +534,99 @@ function renderDrugs() {
 }
 $("openDrugs").addEventListener("click", () => { renderDrugs(); $("drugModal").classList.remove("hidden"); });
 $("scanDrug").addEventListener("click", () => {
+  if (!DEMO) { toast("拍照识别药盒尚未接入"); return; }
   $("drugName").value = "缬沙坦胶囊";
   toast("已识别药盒：缬沙坦胶囊（演示）");
 });
-$("addDrug").addEventListener("click", () => {
+$("addDrug").addEventListener("click", async () => {
   const name = $("drugName").value.trim();
   if (!name) { toast("请先填写或拍照识别药品名称"); return; }
-  drugs.push({
+  const payload = {
     name,
     stock: Math.max(0, Number($("drugStock").value) || 0),
     days: Math.max(1, Number($("drugDays").value) || 1),
-  });
+  };
+  if (!DEMO) {
+    try {
+      await postJSON("/api/drugs", payload);
+      $("drugName").value = "";
+      await renderDrugs();
+      toast("药品已保存，补药提醒已开启");
+    } catch (e) {
+      toast("药品保存失败");
+    }
+    return;
+  }
+  drugs.push(payload);
   $("drugName").value = "";
   renderDrugs();
   toast("药品已添加，补药提醒已开启（演示）");
 });
 
+/* ---------- live dashboard ---------- */
+function componentText(component, onlineText = "在线") {
+  if (!component || component.status === "unknown") return "未接入";
+  return component.status === "online" ? onlineText : "降级";
+}
+function renderSummary(s) {
+  $("dataBadge").textContent = "实时数据";
+  $("elderName").textContent = s.elder?.name || "老人";
+  $("elderMeta").textContent = "已绑定老人";
+  $("presence").textContent = `● ${s.presence.label}`;
+  $("presence").className = `pill ${s.presence.code === "home_active" || s.presence.code === "home_still" ? "ok" : "warn"}`;
+  $("safetyTag").textContent = s.safety.abnormal.label;
+  $("safetyTag").className = `pill ${s.safety.abnormal.level === "ok" ? "calm" : "warn"}`;
+  $("updatedAt").textContent = `更新于 ${fmtTime(s.generated_at)}`;
+  $("wakeTime").textContent = s.safety.wake_time ? fmtTime(s.safety.wake_time) : "未确认";
+  $("activityTime").textContent = s.safety.activity_seconds == null ? "未接入" : `${s.safety.activity_seconds} 秒`;
+  $("abnormalText").textContent = s.safety.abnormal.label;
+  const med = s.medication;
+  $("medCount").textContent = med.total ? `${med.confirmed} / ${med.total} 次` : "未配置";
+  $("medProgress").style.width = med.total ? `${Math.round(med.confirmed / med.total * 100)}%` : "0%";
+  $("medDetail").textContent = med.total
+    ? (med.pending ? `${med.pending} 次待确认` : "已全部确认")
+    : "当前没有实际用药调度";
+  $("medWarning").hidden = med.pending === 0;
+  $("medWarning").textContent = med.pending ? `⚠ ${med.pending} 次未确认，将按实际升级流程处理。` : "";
+  $("cameraStatus").textContent = componentText(s.devices.camera);
+  $("speakerStatus").textContent = "未接入";
+  $("sensorStatus").textContent = s.devices.notify.pending_count || s.devices.notify.dead_count
+    ? `通知 ${s.devices.notify.pending_count} 待重试 / ${s.devices.notify.dead_count} 失败`
+    : "通知正常";
+}
+async function loadDashboard() {
+  if (DEMO) return;
+  try {
+    const [summary, timeline] = await Promise.all([
+      getJSON("/api/dashboard/summary"),
+      getJSON("/api/dashboard/timeline"),
+    ]);
+    renderSummary(summary);
+    renderTimeline(timeline.map(e => ({
+      time: fmtTime(e.ts), icon: "•", title: e.title,
+      detail: Object.keys(e.detail || {}).length ? JSON.stringify(e.detail) : "无补充详情",
+    })));
+  } catch (e) {
+    $("dataBadge").textContent = "实时数据不可用";
+    $("presence").textContent = "● 状态未确认";
+    $("presence").className = "pill warn";
+    toast("实时数据加载失败，请检查服务");
+  }
+}
+
 renderRules();
+if (!DEMO) {
+  $("videoBtn").disabled = true;
+  $("videoBtn").title = "视频服务未接入";
+  $("dialectBtn").disabled = true;
+  $("dialectBtn").title = "方言录音上传与播放链路未接入";
+  $("dialectState").textContent = "方言录制未接入";
+  $("scanDrug").disabled = true;
+  $("scanDrug").title = "拍照识别链路未接入";
+  loadRules();
+  loadDashboard();
+  setInterval(loadDashboard, 15000);
+}
 </script>
 </body>
 </html>

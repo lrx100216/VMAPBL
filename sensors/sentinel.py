@@ -421,23 +421,20 @@ class EdgeSentinel:
         return events
 
     def process_frame(
-        self, frame: np.ndarray, ts: float | None = None
+        self, frame: np.ndarray | None, ts: float | None = None
     ) -> tuple[bool, float, list[str]]:
-        """处理一帧图像并进行边沿事件检测。
+        """处理新帧或无新帧的计时 tick。
 
-        返回值:
-            (is_motion, diff_ratio, detected_events)
-            detected_events 可能包含:
-              - "motion_start"
-              - "motion_stop"
-              - "sudden_still"
-              - 定时触发原因 (如 "wakeup", "medication_check")
+        frame=None 表示实时源没有新图：不重复做图像差分，但仍推进静止与定时逻辑。
         """
         cur_ts = time.time() if ts is None else float(ts)
 
-        # 1. 降采样并计算差分
-        gray = self.preprocess_frame(frame)
-        ratio = self.compute_diff(gray)
+        # 1. 有新图才做差分；冻结/无新图只推进安静状态
+        if frame is None:
+            ratio = 0.0
+        else:
+            gray = self.preprocess_frame(frame)
+            ratio = self.compute_diff(gray)
         is_motion = ratio > self.motion_threshold
 
         # 2. 记入运动历史（滑动窗口淘汰）
@@ -644,11 +641,62 @@ async def run_sentinel(
 
     # 若摄像头有 start 接口且未启动，自动启动
     if hasattr(camera, "start") and hasattr(camera, "started") and not camera.started:
-        camera.start()
+        await asyncio.get_running_loop().run_in_executor(None, camera.start)
 
     iteration = 0
+    last_frame_ts: float | None = None
+    callback_queue: asyncio.Queue | None = None
+    callback_task: asyncio.Task | None = None
+    dropped_events = 0
+    queue_stop = object()
+
+    async def _invoke_callback(obs) -> None:
+        if inspect.iscoroutinefunction(on_event_callback):
+            await on_event_callback(obs)
+        else:
+            ret = on_event_callback(obs)
+            if asyncio.iscoroutine(ret):
+                await ret
+
+    async def _callback_worker() -> None:
+        while True:
+            obs = await callback_queue.get()
+            try:
+                if obs is queue_stop:
+                    return
+                try:
+                    await _invoke_callback(obs)
+                except Exception as cb_err:
+                    log.exception("执行 sentinel 事件回调失败: %s", cb_err)
+            finally:
+                callback_queue.task_done()
+
+    if on_event_callback is not None:
+        from core import config
+        queue_size = int((config.settings().get("sentinel") or {}).get(
+            "callback_queue_size", 32))
+        callback_queue = asyncio.Queue(maxsize=max(1, queue_size))
+        callback_task = asyncio.create_task(_callback_worker(), name="sentinel-callbacks")
+
+    def _offer_callback(obs, *, high_priority: bool) -> None:
+        nonlocal dropped_events
+        if callback_queue is None:
+            return
+        if callback_queue.full():
+            if not high_priority:
+                dropped_events += 1
+                log.warning("回调队列已满，合并丢弃普通事件 %s", obs.trigger_reason)
+                return
+            try:
+                callback_queue.get_nowait()  # 丢弃最旧一条，给高危事件让位
+                callback_queue.task_done()
+            except asyncio.QueueEmpty:
+                pass
+        callback_queue.put_nowait(obs)
+
     log.info("EdgeSentinel 启动: 目标帧率 %.1f fps (周期 %.0f ms)", sentinel.fps, interval * 1000)
 
+    cancelled = False
     try:
         while not (stop_event and stop_event.is_set()):
             if max_iterations is not None and iteration >= max_iterations:
@@ -668,7 +716,15 @@ async def run_sentinel(
             if hasattr(camera, "latest"):
                 res = camera.latest()
                 if res is not None:
-                    ts, raw_frame = res
+                    frame_ts, candidate = res
+                    if getattr(camera, "source_is_file", False):
+                        ts, raw_frame = res  # 离线回放保留素材时间戳
+                    else:
+                        # 实时源重复 latest() 只推进计时，不重复处理旧图或沿用旧时间
+                        if frame_ts != last_frame_ts:
+                            raw_frame = candidate
+                            last_frame_ts = frame_ts
+                        ts = time.time()
             elif hasattr(camera, "read"):
                 ok, f = camera.read()
                 if ok:
@@ -684,8 +740,8 @@ async def run_sentinel(
                     raw_frame = res
                     ts = time.time()
 
-            if raw_frame is not None:
-                # 记录核心处理段耗时
+            if raw_frame is not None or last_frame_ts is not None:
+                # 无新图时也推进安静计时；observation.frame 保持 None，不伪用旧图
                 t_proc_start = time.perf_counter()
                 is_motion, ratio, events = sentinel.process_frame(raw_frame, ts=ts)
                 proc_ms = (time.perf_counter() - t_proc_start) * 1000.0
@@ -701,15 +757,10 @@ async def run_sentinel(
                         diff_ratio=ratio,
                     )
                     if on_event_callback is not None:
-                        try:
-                            if inspect.iscoroutinefunction(on_event_callback):
-                                await on_event_callback(obs)
-                            else:
-                                ret = on_event_callback(obs)
-                                if asyncio.iscoroutine(ret):
-                                    await ret
-                        except Exception as cb_err:
-                            log.exception("执行 sentinel 事件回调失败: %s", cb_err)
+                        _offer_callback(
+                            obs,
+                            high_priority=(ev in ("sudden_still", "fall", "emergency")),
+                        )
 
             # 定速睡眠，释放 CPU
             elapsed = time.perf_counter() - t_cycle_start
@@ -717,11 +768,24 @@ async def run_sentinel(
             await asyncio.sleep(sleep_s)
 
     except (asyncio.CancelledError, KeyboardInterrupt):
+        cancelled = True
         log.info("EdgeSentinel 异步循环已优雅退出")
     finally:
+        if callback_task is not None:
+            if cancelled:
+                callback_task.cancel()
+                await asyncio.gather(callback_task, return_exceptions=True)
+            else:
+                try:
+                    callback_queue.put_nowait(queue_stop)
+                    await callback_task
+                except (asyncio.CancelledError, Exception):
+                    callback_task.cancel()
+                    await asyncio.gather(callback_task, return_exceptions=True)
         if is_cam_inst:
             set_current(None)
         stats = sentinel.get_benchmark_stats()
+        stats["dropped_events"] = dropped_events
         log.info(
             "EdgeSentinel 运行报告: 检查 %d 次, 平均 %.3f ms/次 (目标 <1ms: %s), 最大 %.3f ms, 触发事件 %d 个",
             stats["checks_count"],

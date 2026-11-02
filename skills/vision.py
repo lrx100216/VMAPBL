@@ -44,16 +44,41 @@ def grab_frame(max_edge: int = 1280) -> np.ndarray | None:
     from sensors.camera import get_current
     cam = get_current()
     if cam is not None and cam.started:
-        latest = cam.latest()
-        if latest is None:
-            print("[vision] 感知回路还没采到帧")
+        frame = cam.fresh_frame()
+        if frame is None:
+            print("[vision] 无新鲜画面可用（未采到帧或画面已过期）")
             return None
-        frame = latest[1].copy()  # 复制一份，调用方随意缩放不影响采集线程
         h, w = frame.shape[:2]
         if max(h, w) > max_edge:
             scale = max_edge / max(h, w)
             frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
         return frame
+    source = config.video_source()
+    if isinstance(source, str) and source.lower().startswith(
+            ("rtsp://", "rtmp://", "http://", "https://", "udp://", "tcp://")):
+        # 单场景 RTSP 也复用 Camera 后端和重连，不能交给 AVFoundation
+        from sensors.camera import Camera
+        temp_cam = Camera.from_settings()
+        try:
+            temp_cam.start()
+            frame = None
+            for _ in range(5):
+                frame = temp_cam.fresh_frame()
+                if frame is not None:
+                    break
+                time.sleep(0.05)
+            if frame is None:
+                return None
+            h, w = frame.shape[:2]
+            if max(h, w) > max_edge:
+                scale = max_edge / max(h, w)
+                frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+            return frame
+        except Exception as e:
+            print(f"[vision] 网络抓帧失败（{type(e).__name__}）")
+            return None
+        finally:
+            temp_cam.stop()
     try:
         cap = cv2.VideoCapture(config.video_source(), cv2.CAP_AVFOUNDATION)
         if not cap.isOpened():

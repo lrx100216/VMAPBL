@@ -209,9 +209,7 @@ class VLAPolicy:
 
         # 1. 语音中包含明显求助/不适关键词且未被否定词前缀修饰 -> 紧急响应
         distress_keywords = ["救命", "摔", "疼", "起不来", "动不了", "难受", "头晕", "心慌", "不舒服", "救救我"]
-        fine_keywords = ["没事", "没摔", "还好", "自己起来", "不疼"]
-        has_fine = any(k in speech for k in fine_keywords)
-        if speech and _distress_in_speech(speech, distress_keywords) and not has_fine:
+        if speech and _distress_in_speech(speech, distress_keywords):
             return {
                 "scene_understanding": f"老人明确呼救或表达不适：「{speech}」，视觉信号受限，触发紧急响应。",
                 "safety_risk": "emergency",
@@ -484,9 +482,7 @@ class VLAPolicy:
                 from sensors.camera import get_current
                 cam = get_current()
                 if cam is not None and getattr(cam, "started", False):
-                    latest = cam.latest()
-                    if latest is not None:
-                        frame = latest[1]
+                    frame = cam.fresh_frame()
             except Exception:
                 frame = None
 

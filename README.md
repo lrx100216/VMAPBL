@@ -366,6 +366,22 @@ python main.py --require-production --serve
   独立看门狗可给出 `not_ready:notify`。只有实际平台回执成功才算 delivered，
   原有的“未送达不武装跌倒静默”保持不变。
 
+**生产化加固（2026-11-02）**。
+
+- 紧急通知在外发前写入 outbox，取消/崩溃也保留 pending；旧 `send()` 与回执
+  入口统一。永久失败转 dead，`Retry-After` 传递到后续重试，worker 有界并发。
+- 哨兵冻结帧按运行时钟推进静止/定时逻辑，不携带旧画面；慢回调进入有界
+  队列，采样不被 VLM/TTS 阻塞。classic/VLA 共用报警静默与否定词判断。
+- 首页支持真实 dashboard summary/timeline；未知和未接入明确显示，`?demo=1`
+  才展示 mock。规则启停真正影响场景并写入 `disabled_scenes`，药品余量持久化
+  到 SQLite；未接入的视频通话、方言录制和拍照识别保持禁用。
+- 摄像头/单场景 RTSP 使用新鲜帧，过期画面不进入 VLM；ring 按实际编码频率
+  保留 60 秒，启动重试放 executor，停止时防止双采集线程。
+- DB 探针真实写入并回滚；每日清理历史、在线备份到 `data/backup/`；提供
+  `deploy/newsyslog.butler.conf` 轮转 launchd 输出。
+- 服药观察窗声明 `background: true`，定时仲裁不等待，手动触发返回 202 和
+  `task_id`；同步 `engine.trigger()` 仍保留给回放与测试。
+
 **第三阶段：真机部署与常驻运维验证**。
 
 网络摄像头：`VIDEO_SOURCE` 支持 `rtsp://`、`rtmp://`、`http(s)://`，走 FFmpeg 后端，

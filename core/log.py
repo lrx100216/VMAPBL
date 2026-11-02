@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS notification_outbox (
     created_ts REAL NOT NULL,
     updated_ts REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS medications (
+    name TEXT PRIMARY KEY,
+    stock INTEGER NOT NULL,
+    days INTEGER NOT NULL,
+    created_ts REAL NOT NULL,
+    updated_ts REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_scene ON events(scene_id);
 CREATE INDEX IF NOT EXISTS idx_api_ts ON api_calls(ts);
@@ -225,6 +232,42 @@ class EventLog:
                      time.time(), int(row_id)))
             self._conn.commit()
 
+    def upsert_medication(self, name: str, stock: int, days: int) -> None:
+        """按药品名保存余量与提前补药天数；不自动扣库存。"""
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO medications(name,stock,days,created_ts,updated_ts)"
+                " VALUES(?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET"
+                " stock=excluded.stock,days=excluded.days,updated_ts=excluded.updated_ts",
+                (name, int(stock), int(days), now, now))
+            self._conn.commit()
+
+    def list_medications(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT name,stock,days,updated_ts FROM medications"
+                " ORDER BY name").fetchall()
+        return [{"name": name, "stock": int(stock), "days": int(days),
+                 "updated_ts": float(updated)} for name, stock, days, updated in rows]
+
+    def has_pending_notification(self, msg_id: int) -> bool:
+        """该本地消息是否仍有可恢复的 pending 外发记录。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM notification_outbox"
+                " WHERE msg_id=? AND status='pending' LIMIT 1", (int(msg_id),)).fetchone()
+        return row is not None
+
+    def mark_notification_delivered(self, msg_id: int) -> None:
+        """平台已确认送达：关闭该消息的 pending 记录。"""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE notification_outbox SET status='delivered',"
+                " last_error=NULL,updated_ts=?"
+                " WHERE msg_id=? AND status='pending'", (time.time(), int(msg_id)))
+            self._conn.commit()
+
     def notification_health(self) -> dict:
         """通知健康快照：pending/dead 与最近真实送达时间。"""
         with self._lock:
@@ -239,12 +282,20 @@ class EventLog:
                 "last_delivered_ts": last}
 
     def ping(self) -> bool:
-        """轻量可写性探针（/readyz 与心跳用）；不抛异常。"""
+        """用真实写入事务验证 DB 可写，回滚后不留健康探针记录。"""
         try:
             with self._lock:
-                self._conn.execute("SELECT 1").fetchone()
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._conn.execute(
+                    "INSERT INTO events(ts,scene_id,kind,detail) VALUES(?,?,?,?)",
+                    (time.time(), "__health__", "health_probe", "{}"))
+                self._conn.rollback()
             return True
         except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
             return False
 
     def prune_events(self, keep_days: int = 30) -> int:
@@ -257,6 +308,31 @@ class EventLog:
             deleted = cur.rowcount
             self._conn.commit()
             return int(deleted)
+
+    def prune_history(self, keep_days: int = 30) -> int:
+        """清理历史事件/API/消息和已结束 outbox；pending 永不删除。"""
+        if keep_days <= 0:
+            return 0
+        cutoff = time.time() - keep_days * 86400
+        deleted = 0
+        with self._lock:
+            for table in ("events", "api_calls", "messages"):
+                cur = self._conn.execute(
+                    f"DELETE FROM {table} WHERE ts < ?", (cutoff,))
+                deleted += cur.rowcount
+            cur = self._conn.execute(
+                "DELETE FROM notification_outbox"
+                " WHERE status IN ('delivered','dead') AND updated_ts < ?", (cutoff,))
+            deleted += cur.rowcount
+            self._conn.commit()
+        return int(deleted)
+
+    def backup_to(self, path: str | Path) -> None:
+        """SQLite 在线备份；调用方负责定期执行和保留策略。"""
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            self._conn.execute("VACUUM INTO ?", (str(target),))
 
     def close(self) -> None:
         with self._lock:

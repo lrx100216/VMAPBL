@@ -26,6 +26,7 @@ import argparse
 import asyncio
 import os
 import sys
+import time
 
 from actions import SKILLS
 from core import config
@@ -75,8 +76,9 @@ async def _perceive_loop(engine: SceneEngine) -> int:
     pose_est = PoseEstimator()
     print("⏳ 正在预热姿态模型（消除运行期首帧卡顿）……", flush=True)
     await asyncio.get_running_loop().run_in_executor(None, pose_est.warmup)
+    from sensors.camera import safe_source
     print("👁 感知模式已启动，Ctrl+C 退出。"
-          f"视频源：{_cfg.video_source()!r}（文件路径即离线回放）")
+          f"视频源：{safe_source(_cfg.video_source())!r}（文件路径即离线回放）")
     print("  场景触发器已接线：state（场景3）/ event sensor.still（场景6）"
           "+ sensor.sudden_still（场景7）/ time 08:30+09:00（场景5）"
           "+ 09:30（场景4）")
@@ -100,8 +102,15 @@ async def _heartbeat_loop(log: EventLog, voice_task=None,
     ops = config.settings().get("ops") or {}
     path = config.ROOT / str(ops.get("heartbeat_path", "data/heartbeat.json"))
     interval = max(1.0, float(ops.get("heartbeat_s", 10.0)))
+    last_maintenance_day = None
     while not (stop_event is not None and stop_event.is_set()):
         try:
+            today = time.strftime("%Y-%m-%d")
+            if log is not None and today != last_maintenance_day:
+                keep_days = int(ops.get("history_keep_days", 30))
+                log.prune_history(keep_days=keep_days)
+                log.backup_to(config.ROOT / "data" / "backup" / "butler-latest.db")
+                last_maintenance_day = today
             ready, snap = readiness(camera=get_current(), log=log,
                                 pose=get_current_pose())
             snap.update({
@@ -389,7 +398,8 @@ async def amain() -> int:
                               else "file_or_stream"),
     })
     engine = SceneEngine(config.ROOT / "scenes", state, log, skills=SKILLS,
-                         default_cooldown_s=default_cooldown)
+                         default_cooldown_s=default_cooldown,
+                         disabled_scenes=set(config.settings().get("disabled_scenes") or []))
 
     try:
         if args.list:

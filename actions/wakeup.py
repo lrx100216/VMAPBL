@@ -52,7 +52,8 @@ def classify_wakeup(hist=None) -> str:
 
 
 def _urgent_in_reply(reply: str, keywords: list[str]) -> bool:
-    return any(k in reply for k in keywords)
+    from core.vla_agent import _distress_in_speech
+    return _distress_in_speech(reply, keywords)
 
 
 async def _voice_check(ctx: dict, question: str, *, phase: str,

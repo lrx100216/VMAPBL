@@ -80,6 +80,25 @@ def delete_roi(name: str, settings_path: Path | None = None) -> bool:
     return True
 
 
+def save_disabled_scenes(names: set[str], settings_path: Path | None = None) -> list[str]:
+    """持久化场景启停并热刷新缓存（保留 YAML 注释）。"""
+    from ruamel.yaml import YAML
+    target = settings_path or _SETTINGS_PATH
+    ryaml = YAML()
+    ryaml.preserve_quotes = True
+    with _yaml_lock:
+        if target.exists():
+            with open(target, encoding="utf-8") as f:
+                data = ryaml.load(f) or {}
+        else:
+            data = {}
+        data["disabled_scenes"] = sorted(names)
+        with open(target, "w", encoding="utf-8") as f:
+            ryaml.dump(data, f)
+        reload_settings()
+    return sorted(names)
+
+
 def api_key() -> str:
     """DeepSeek API Key；未配置时给出明确指引。"""
     key = os.getenv("DEEPSEEK_API_KEY", "").strip()

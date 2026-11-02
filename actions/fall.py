@@ -21,17 +21,18 @@ from actions import skill
 from core import config
 from sensors import geometry, perception
 
-_stopped_until = 0.0  # 确认报警后的静默截止时刻（time.time() 墙钟）
+from core.vla_agent import is_alert_silenced, reset_silence, silence_alert
+
+_stopped_until = 0.0  # 兼容旧引用；实际状态由 core.vla_agent 统一维护
 
 
 def reset_stop() -> None:
-    """清防重复静默标志（测试用；进程重启也自然清零）。"""
-    global _stopped_until
-    _stopped_until = 0.0
+    """清 classic/VLA 共享的防重复静默标志。"""
+    reset_silence()
 
 
 def stopped() -> bool:
-    return time.time() < _stopped_until
+    return is_alert_silenced()
 
 
 @skill("fall_decide")
@@ -113,7 +114,6 @@ async def fall_confirm(ctx: dict) -> str:
         await tts.speak("好的，那您慢一点，注意安全。")
         return "cancelled"
 
-    global _stopped_until
     if reply:
         receipt = await notify.send_with_receipt(
             f"疑似跌倒！老人语音回复：「{reply}」，请立即查看！", urgent=True)
@@ -121,5 +121,5 @@ async def fall_confirm(ctx: dict) -> str:
         receipt = await notify.send_with_receipt(
             "疑似跌倒且语音询问无应答，请立即查看！", urgent=True)
     if receipt.delivered:
-        _stopped_until = time.time() + float(cfg.get("re_alert_s", 1800))
+        silence_alert(float(cfg.get("re_alert_s", 1800)))
     return "alerted"

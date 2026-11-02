@@ -70,6 +70,7 @@ class Scene:
     action: list[dict] = field(default_factory=list)
     mode: str = "single"   # single：运行中不重入
     priority: int = 0      # 仲裁优先级：跌倒 100 > 未起床 90 > 起身 80 > 其他 0
+    background: bool = False  # 长任务在仲裁队列中异步执行，手动 trigger 仍兼容同步
 
 
 def _parse_hms(s: Any, where: str) -> "datetime.time":
@@ -145,7 +146,7 @@ def load_scene(path: Path) -> Scene:
     missing = [k for k in ("id", "name", "trigger", "action") if k not in data]
     if missing:
         raise SceneError(f"{path.name}: 缺少必填字段 {missing}")
-    known = {"id", "name", "trigger", "condition", "action", "mode", "priority"}
+    known = {"id", "name", "trigger", "condition", "action", "mode", "priority", "background"}
     unknown = set(data) - known
     if unknown:
         raise SceneError(f"{path.name}: 未知字段 {sorted(unknown)}（支持 {sorted(known)}）")
@@ -195,10 +196,13 @@ def load_scene(path: Path) -> Scene:
     raw_prio = data.get("priority", 0)
     if isinstance(raw_prio, bool) or not isinstance(raw_prio, (int, float)):
         raise SceneError(f"{path.name}: priority 必须是整数，收到 {raw_prio!r}")
+    background = data.get("background", False)
+    if not isinstance(background, bool):
+        raise SceneError(f"{path.name}: background 必须是布尔值")
     return Scene(
         id=str(data["id"]), name=str(data["name"]),
         trigger=trigger, condition=condition, action=data["action"],
-        mode=mode, priority=int(raw_prio),
+        mode=mode, priority=int(raw_prio), background=background,
     )
 
 
@@ -207,16 +211,20 @@ class SceneEngine:
 
     def __init__(self, scenes_dir: str | Path, state: StateStore, log: EventLog,
                  skills: dict[str, Callable] | None = None,
-                 default_cooldown_s: float = 60.0):
+                 default_cooldown_s: float = 60.0,
+                 disabled_scenes: set[str] | None = None):
         self._state = state
         self._log = log
         self._skills = dict(skills or {})
         self._default_cooldown_s = float(default_cooldown_s)
+        self._disabled = set(disabled_scenes or ())
         self._scenes: dict[str, Scene] = {}
         self._running: set[str] = set()
         self._time_fired: dict[str, str] = {}   # time 触发器：场景 id → 已触发日期
         self._time_task = None
         self._bus_handlers: list[tuple[str, Any]] = []
+        self._background_tasks: dict[str, asyncio.Task] = {}
+        self._background_seq = 0
         self._load_all(Path(scenes_dir))
 
     def _load_all(self, scenes_dir: Path) -> None:
@@ -400,10 +408,25 @@ class SceneEngine:
         for pattern, handler in list(self._bus_handlers):
             bus.unsubscribe(handler, pattern)
         self._bus_handlers.clear()
+        for task in list(self._background_tasks.values()):
+            task.cancel()
+        self._background_tasks.clear()
 
     @property
     def scenes(self) -> dict[str, Scene]:
         return dict(self._scenes)
+
+    def is_scene_enabled(self, scene_id: str) -> bool:
+        return scene_id not in self._disabled
+
+    def set_scene_enabled(self, scene_id: str, enabled: bool) -> None:
+        """运行时启停；trigger 统一检查，避免只改 UI 不改实际行为。"""
+        if scene_id not in self._scenes:
+            raise SceneError(f"未知场景 id：{scene_id}")
+        if enabled:
+            self._disabled.discard(scene_id)
+        else:
+            self._disabled.add(scene_id)
 
     async def trigger(self, scene_id: str, ctx: dict | None = None,
                       source: str = "manual") -> bool:
@@ -414,6 +437,9 @@ class SceneEngine:
         scene = self._scenes.get(scene_id)
         if scene is None:
             raise SceneError(f"未知场景 id：{scene_id}（用 --list 查看已有场景）")
+        if not self.is_scene_enabled(scene_id):
+            self._log.log_event(scene_id, "skipped", {"reason": "场景已停用"})
+            return False
         self._log.log_event(scene_id, "trigger", {"source": source})
         if scene.mode == "single" and scene_id in self._running:
             self._log.log_event(scene_id, "skipped", {"reason": "mode=single，场景正在运行中"})
@@ -423,6 +449,19 @@ class SceneEngine:
             return await self._run(scene, dict(ctx or {}))
         finally:
             self._running.discard(scene_id)
+
+    def submit(self, scene_id: str, ctx: dict | None = None) -> str:
+        """把 background 场景提交为可追踪任务，返回任务 ID。"""
+        scene = self._scenes.get(scene_id)
+        if scene is None:
+            raise SceneError(f"未知场景 id：{scene_id}")
+        self._background_seq += 1
+        task_id = f"{scene_id}-{self._background_seq}"
+        task = asyncio.create_task(self.trigger(scene_id, ctx, source="background"),
+                                   name=f"scene-{task_id}")
+        self._background_tasks[task_id] = task
+        task.add_done_callback(lambda _t: self._background_tasks.pop(task_id, None))
+        return task_id
 
     async def run_queued(self, scene_ids: list[str],
                          ctx: dict | None = None) -> dict[str, bool | None]:
@@ -438,6 +477,10 @@ class SceneEngine:
             scenes.append(scene)
         results: dict[str, bool | None] = {}
         for scene in sorted(scenes, key=lambda s: -s.priority):
+            if scene.background:
+                self.submit(scene.id, ctx)
+                results[scene.id] = True
+                continue
             try:
                 results[scene.id] = await self.trigger(scene.id, ctx,
                                                        source="arbiter")

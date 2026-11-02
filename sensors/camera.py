@@ -56,7 +56,10 @@ class Camera:
         self.ring_seconds = float(ring_seconds)
         self.ring_width = int(ring_width)
         self.ring_jpeg_quality = int(ring_jpeg_quality)
-        maxlen = max(1, int(round(self.fps * self.ring_seconds)))
+        is_file = (isinstance(self.source, str)
+                   and not self.source.lower().startswith(self._STREAM_PREFIXES))
+        encode_stride = 1 if is_file else 3
+        maxlen = max(1, int(round(self.fps * self.ring_seconds / encode_stride)))
         self._ring: deque[tuple[float, bytes]] = deque(maxlen=maxlen)
         self._latest: tuple[float, np.ndarray] | None = None
         self._latest_jpeg: tuple[float, bytes, int, int] | None = None
@@ -120,9 +123,34 @@ class Camera:
     def start(self) -> None:
         """打开视频源并启动采集线程。打不开时抛出带排障指引的 RuntimeError。"""
         if self.started:
-            return
-        cap = self._open_capture()
-        if not cap.isOpened():
+            if self._thread.is_alive():
+                return
+            # 上次线程已自然退出，允许安全重启并清理旧句柄
+            self._thread = None
+            if self._cap is not None:
+                self._cap.release()
+                self._cap = None
+        if self.source_is_stream:
+            # 底层 FFmpeg 错误可能带完整 RTSP URL；应用层只输出 safe_source
+            cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
+        cfg = config.settings().get("camera", {})
+        max_attempts = max(1, int(cfg.get("start_attempts", 3)))
+        retry_s = max(0.0, float(cfg.get("reconnect_s", 2.0)))
+        self._stop.clear()
+        cap = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                cap = self._open_capture()
+                break
+            except RuntimeError:
+                if not self.source_is_stream or attempt >= max_attempts:
+                    raise
+                self.reconnects += 1
+                log.warning("网络视频源第 %d 次启动失败，%s 秒后重试",
+                            attempt, retry_s)
+                if self._stop.wait(retry_s):
+                    raise RuntimeError("视频源启动已取消")
+        if cap is None or not cap.isOpened():
             raise RuntimeError(
                 f"视频源打不开：{safe_source(self.source)!r}。"
                 "摄像头请在 Terminal.app/iTerm 本地窗口首次运行以完成 TCC 授权；"
@@ -246,6 +274,20 @@ class Camera:
             "healthy": bool(self.started and age is not None and age <= stale_s),
         }
 
+    def fresh_frame(self, max_age_s: float | None = None):
+        """返回仍在新鲜度窗口内的帧副本；过期/未启动返回 None，禁止冒充实时。"""
+        if not self.started:
+            return None
+        latest = self.latest()
+        if latest is None:
+            return None
+        ts, frame = latest
+        if max_age_s is None:
+            max_age_s = float(config.settings().get("camera", {}).get("stale_s", 10.0))
+        if time.time() - ts > max_age_s:
+            return None
+        return frame.copy()
+
     def latest_jpeg(self) -> tuple[float, bytes, int, int] | None:
         """最新已编码的缩略图 (ts, jpeg_bytes, orig_w, orig_h)，供控制台零拷贝直取。"""
         with self._lock:
@@ -268,6 +310,10 @@ class Camera:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                # 保留句柄，阻止 start() 再开第二条线程；不能在仍被使用时释放 cap
+                log.warning("摄像头采集线程未在 2 秒内退出，保留句柄等待自然退出")
+                return
             self._thread = None
         if self._cap is not None:
             self._cap.release()
