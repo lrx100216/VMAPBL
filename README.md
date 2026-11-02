@@ -3,6 +3,17 @@
 运行在 MacBook Air M2 上的多模态养老守护系统：本地廉价感知（OpenCV/YOLO）
 + 云端按需理解（DeepSeek 视觉模型），单进程 asyncio，macOS 原生音视频。
 
+## 双击启动（macOS）
+
+在 Finder 打开项目目录，双击 **`VMAPBL Butler.app`**：
+
+- 启动 `main.py --serve`，健康检查通过后自动打开 `http://127.0.0.1:8321/`。
+- 重复双击只打开页面，不重复启动服务、不重复占用摄像头。
+- 启动失败会提示查看 `logs/launcher.out.log` 和 `logs/butler.log`。
+- 请保留整个项目目录；该应用依赖现有 `.venv` 和模型文件，不是独立免安装包。
+- 首次出现摄像头/麦克风权限提示时请允许；若未弹出，请先在 Terminal.app
+  运行 `.venv/bin/python tools/permission_check.py` 完成系统授权。
+
 ## 目录结构
 
 ```
