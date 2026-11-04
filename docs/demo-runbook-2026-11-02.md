@@ -199,8 +199,14 @@ curl -sS http://127.0.0.1:8321/readyz
 
 当前 demo 阻塞与处理：
 
-1. **摄像头未授权**：后台进程没有 macOS 相机权限，`readyz=503`。请在 Terminal.app 中运行
-   `.venv/bin/python tools/permission_check.py` 并允许摄像头/麦克风。
+1. **摄像头和麦克风未授权**：当前宿主进程实测摄像头返回未授权、麦克风录到全零。
+   处理步骤：
+   - 打开「系统设置 → 隐私与安全性 → 相机 / 麦克风」；
+   - 勾选实际启动服务的 App（Claude，或你使用的 Terminal / iTerm）；
+   - 完全退出该 App（⌘Q）后重新打开；
+   - 在 Terminal.app 运行 `.venv/bin/python tools/permission_check.py`，
+     确认摄像头与麦克风两项通过；
+   - 再启动 demo 服务。双击启动器在 `/readyz` 非 200 时会发系统通知提示“感知降级”。
 2. **RTSP 摄像头不可达**：`192.168.0.112:554` 当前 `No route to host`。要么修复网络，
    要么 demo 时使用本机摄像头：`VIDEO_SOURCE=0 .venv/bin/python main.py --serve`。
    双击启动器仍会先检测已运行服务，只打开页面；若服务已关闭，它会按 `.env` 的 RTSP 启动并保持降级。

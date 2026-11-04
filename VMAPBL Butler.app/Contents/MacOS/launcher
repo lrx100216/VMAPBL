@@ -4,17 +4,31 @@ set -u
 
 APP_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 PROJECT_LINK="$(dirname "$0")/../Resources/project"
+PROJECT_PATH_FILE="$(dirname "$0")/../Resources/project.path"
 if [ -e "$PROJECT_LINK" ]; then
-    # 从 /Applications 或其他位置启动时，仍指向原项目目录
+    # 旧安装方式：符号链接（会让 codesign 校验失败，后续安装改用路径文件）
     APP_ROOT="$(cd "$PROJECT_LINK" && pwd)"
+elif [ -f "$PROJECT_PATH_FILE" ]; then
+    # 新安装方式：普通文本文件记录项目路径，包内没有指向包外的符号链接
+    APP_ROOT="$(<"$PROJECT_PATH_FILE")"
 fi
 CONSOLE_URL="http://127.0.0.1:8321/"
 HEALTH_URL="http://127.0.0.1:8321/healthz"
+READY_URL="http://127.0.0.1:8321/readyz"
 PYTHON="$APP_ROOT/.venv/bin/python"
 LOG_FILE="$APP_ROOT/logs/launcher.out.log"
 
+warn_if_degraded() {
+    local code
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 1 "$READY_URL" 2>/dev/null || true)
+    if [ "$code" != "200" ]; then
+        osascript -e 'display notification "感知降级：请检查摄像头/麦克风权限或 RTSP 网络，详见 /readyz 与 logs/launcher.out.log" with title "VMAPBL"'
+    fi
+}
+
 # 已经运行时只打开页面，避免重复启动第二个服务/抢占摄像头。
 if curl -fsS --max-time 1 "$HEALTH_URL" >/dev/null 2>&1; then
+    warn_if_degraded
     open "$CONSOLE_URL"
     exit 0
 fi
@@ -38,6 +52,7 @@ trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 # 最多等待 45 秒；模型加载可能耗时，期间检查服务是否异常退出。
 for _ in {1..45}; do
     if curl -fsS --max-time 1 "$HEALTH_URL" >/dev/null 2>&1; then
+        warn_if_degraded
         open "$CONSOLE_URL"
         wait "$SERVER_PID"
         exit $?

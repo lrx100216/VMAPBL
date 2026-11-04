@@ -68,6 +68,11 @@ CREATE TABLE IF NOT EXISTS medications (
     created_ts REAL NOT NULL,
     updated_ts REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS system_state (
+    key TEXT PRIMARY KEY,
+    val TEXT NOT NULL,
+    updated_ts REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_scene ON events(scene_id);
 CREATE INDEX IF NOT EXISTS idx_api_ts ON api_calls(ts);
@@ -252,6 +257,28 @@ class EventLog:
         return [{"name": name, "stock": int(stock), "days": int(days),
                  "updated_ts": float(updated)} for name, stock, days, updated in rows]
 
+    def set_state_val(self, key: str, val: Any) -> None:
+        """持久化保存关键系统状态（如服药打卡、静默期截止时间戳、升级链日期）。"""
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO system_state(key, val, updated_ts) VALUES (?,?,?)"
+                " ON CONFLICT(key) DO UPDATE SET val=excluded.val, updated_ts=excluded.updated_ts",
+                (str(key), json.dumps(val, ensure_ascii=False, default=str), now))
+            self._conn.commit()
+
+    def get_state_val(self, key: str, default: Any = None) -> Any:
+        """读取持久化的关键系统状态。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT val FROM system_state WHERE key=?", (str(key),)).fetchone()
+        if not row:
+            return default
+        try:
+            return json.loads(row[0])
+        except Exception:
+            return default
+
     def has_pending_notification(self, msg_id: int) -> bool:
         """该本地消息是否仍有可恢复的 pending 外发记录。"""
         with self._lock:
@@ -268,6 +295,29 @@ class EventLog:
                 " last_error=NULL,updated_ts=?"
                 " WHERE msg_id=? AND status='pending'", (time.time(), int(msg_id)))
             self._conn.commit()
+
+    def requeue_dead_notifications(self) -> int:
+        """人工确认后重投 dead 记录；重置预算，自动重试仍然有上限。"""
+        now = time.time()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE notification_outbox SET status='pending',attempts=0,"
+                " next_attempt_ts=?,last_error=NULL,updated_ts=?"
+                " WHERE status='dead'", (now, now))
+            count = cur.rowcount
+            self._conn.commit()
+            return int(count)
+
+    def clear_dead_notifications(self) -> int:
+        """人工确认清除死信记录（归档为 dismissed），解除对 /readyz 的锁定。"""
+        now = time.time()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE notification_outbox SET status='dismissed',updated_ts=?"
+                " WHERE status='dead'", (now,))
+            count = cur.rowcount
+            self._conn.commit()
+            return int(count)
 
     def notification_health(self) -> dict:
         """通知健康快照：pending/dead 与最近真实送达时间。"""

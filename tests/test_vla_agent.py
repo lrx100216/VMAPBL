@@ -432,3 +432,108 @@ async def test_vla_unanswered_check_without_delivery_does_not_silence(
     assert not vla_agent.is_alert_silenced()
     log.close()
 
+
+@pytest.mark.asyncio
+async def test_vla_nonurgent_delivery_cannot_arm_emergency_silence(
+        tmp_path, monkeypatch):
+    from core import vla_agent
+
+    class _Policy:
+        async def decide(self, obs):
+            return {"scene_understanding": "疑似跌倒", "safety_risk": "emergency",
+                    "elder_intent": "none", "actions": [
+                        {"type": "NOTIFY_FAMILY",
+                         "payload": {"msg": "跌倒", "urgent": False}},
+                        {"type": "STOP_ALERT", "payload": {"duration_s": 300}},
+                    ]}
+
+    async def delivered(msg, urgent=False, **kwargs):
+        return NotificationResult(1, True, True, {"dingtalk": "delivered"})
+
+    monkeypatch.setattr("skills.notify.send_with_receipt", delivered)
+    log = EventLog(tmp_path / "vla-nonurgent.db")
+    result = await decide_and_act(
+        {"trigger_reason": "sensor.sudden_still"},
+        state=StateStore(), log=log, policy=_Policy())
+    log.close()
+    assert not vla_agent.is_alert_silenced()
+    assert any(r.get("type") == "STOP_ALERT" and r.get("status") == "skipped"
+               for r in result["action_results"])
+
+
+def test_vla_normalization_forces_emergency_notification_urgent():
+    decision = VLAPolicy()._normalize_decision({
+        "scene_understanding": "老人倒地", "safety_risk": "emergency",
+        "actions": [{"type": "NOTIFY_FAMILY",
+                     "payload": {"msg": "跌倒", "urgent": False}}],
+    }, VLAObservation())
+    assert decision["actions"][0]["payload"]["urgent"] is True
+
+
+def test_vla_normalization_rejects_string_medication_boolean():
+    decision = VLAPolicy()._normalize_decision({
+        "scene_understanding": "服药状态不明", "safety_risk": "normal",
+        "actions": [{"type": "RECORD_MEDICATION",
+                     "payload": {"slot": "morning", "taken": "false"}}],
+    }, VLAObservation())
+    assert decision["actions"][0]["payload"]["taken"] is False
+
+
+@pytest.mark.asyncio
+async def test_vla_dispatch_rejects_string_medication_boolean():
+    result = await dispatch_action(
+        {"type": "RECORD_MEDICATION",
+         "payload": {"slot": "morning", "taken": "false"}},
+        state=StateStore(), log=None)
+    assert result["taken"] is False
+
+
+@pytest.mark.asyncio
+async def test_sentinel_updates_occupancy_on_motion(monkeypatch):
+    """验证 EdgeSentinel 在检测到运动时更新全局 occupancy（AUDIT-010）。"""
+    import sensors.sentinel as sentinel_mod
+    st = StateStore()
+    monkeypatch.setattr(sentinel_mod, "global_state", st)
+    assert st.occupancy is False
+    sentinel = sentinel_mod.EdgeSentinel(fps=10.0, motion_threshold=0.01, update_state=True)
+
+    # 发送有差异帧
+    f1 = np.zeros((120, 160, 3), dtype=np.uint8)
+    f2 = np.ones((120, 160, 3), dtype=np.uint8) * 255
+    sentinel.process_frame(f1, ts=10.0)
+    sentinel.process_frame(f2, ts=10.1)
+    assert st.occupancy is True
+
+
+
+
+@pytest.mark.asyncio
+async def test_vla_motion_start_throttling():
+    """验证连续日常运动事件在节流窗口内不重复调用外部 VLM（AUDIT-011）。"""
+    call_count = 0
+
+    async def mock_json_call(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return {
+            "scene_understanding": "走动",
+            "safety_risk": "normal",
+            "actions": [],
+            "uncertain": False,
+        }
+
+    policy = VLAPolicy(motion_throttle_s=60.0)
+    obs1 = VLAObservation(trigger_reason="motion_start", timestamp=100.0)
+    obs2 = VLAObservation(trigger_reason="motion_start", timestamp=105.0)
+
+    import skills.vision
+    orig_call = skills.vision.json_call
+    try:
+        skills.vision.json_call = mock_json_call
+        dec1 = await policy.decide(obs1)
+        dec2 = await policy.decide(obs2)
+    finally:
+        skills.vision.json_call = orig_call
+
+    assert call_count == 1  # 第一次调用了 vision，第二次被节流直接返回
+    assert dec2["actions"][0]["payload"]["reason"] == "throttled"

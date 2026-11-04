@@ -276,6 +276,16 @@ async def test_family_message_send_flow(tmp_path, monkeypatch):
         return {"recipient": "儿子", "body": "晚上过去吃饭"}
 
     monkeypatch.setattr("actions.messaging.chat_json", fake_chat_json)
+
+    import httpx
+
+    async def delivered_post(self, url, **kwargs):
+        return httpx.Response(200, json={"errcode": 0})
+
+    monkeypatch.setenv("DINGTALK_WEBHOOK", "https://oapi.dingtalk.com/robot/send")
+    monkeypatch.setenv("FEISHU_WEBHOOK", "")
+    monkeypatch.setenv("NOTIFY_WEBHOOK_URL", "")
+    monkeypatch.setattr(httpx.AsyncClient, "post", delivered_post)
     log = EventLog(tmp_path / "msg.db")
     set_default(log)
     try:
@@ -284,6 +294,75 @@ async def test_family_message_send_flow(tmp_path, monkeypatch):
         assert "儿子" in result["speech"]
         msgs = log.list_messages("to_family")
         assert msgs[0]["recipient"] == "儿子" and msgs[0]["text"] == "晚上过去吃饭"
+    finally:
+        set_default(None)
+        log.close()
+
+
+async def test_family_message_pending_receipt_is_not_called_sent(tmp_path, monkeypatch):
+    from actions.messaging import family_message_send
+    from skills.notify import NotificationResult
+
+    async def fake_chat_json(prompt, scene_id="", max_tokens=None):
+        return {"recipient": "儿子", "body": "晚上过去吃饭"}
+
+    async def pending(*args, **kwargs):
+        return NotificationResult(1, True, False, {"dingtalk": "failed"}, pending=True)
+
+    monkeypatch.setattr("actions.messaging.chat_json", fake_chat_json)
+    monkeypatch.setattr("actions.messaging.notify.send_with_receipt", pending)
+    log = EventLog(tmp_path / "pending-msg.db")
+    set_default(log)
+    try:
+        result = await family_message_send({"text": "告诉我儿子晚上过去吃饭"})
+        assert result["status"] == "pending"
+        assert "已经发给" not in result["speech"]
+    finally:
+        set_default(None)
+        log.close()
+
+
+async def test_real_family_message_scene_announces_pending(
+        tmp_path, monkeypatch, _spoken):
+    from actions import SKILLS
+    from core import config
+    from skills.notify import NotificationResult
+
+    async def fake_chat_json(prompt, scene_id="", max_tokens=None):
+        return {"recipient": "儿子", "body": "晚上过去吃饭"}
+
+    async def pending(*args, **kwargs):
+        return NotificationResult(1, True, False, {"dingtalk": "failed"}, pending=True)
+
+    monkeypatch.setattr("actions.messaging.chat_json", fake_chat_json)
+    monkeypatch.setattr("actions.messaging.notify.send_with_receipt", pending)
+    log = EventLog(tmp_path / "pending-scene.db")
+    engine = SceneEngine(config.ROOT / "scenes", StateStore(), log, skills=SKILLS)
+    assert await engine.trigger(
+        "msg_to_family", ctx={"text": "告诉我儿子晚上过去吃饭"}) is True
+    assert any("自动重试" in text for text in _spoken)
+    assert not any("已经发给" in text for text in _spoken)
+    log.close()
+
+
+async def test_family_reply_pending_receipt_is_not_called_replied(tmp_path, monkeypatch):
+    from actions.messaging import family_message_receive
+    from skills.notify import NotificationResult
+
+    async def fake_listen(*args, **kwargs):
+        return "我很好，不用担心"
+
+    async def pending(*args, **kwargs):
+        return NotificationResult(1, True, False, {"dingtalk": "failed"}, pending=True)
+
+    monkeypatch.setattr("actions.messaging.stt.listen", fake_listen)
+    monkeypatch.setattr("actions.messaging.notify.send_with_receipt", pending)
+    log = EventLog(tmp_path / "pending-reply.db")
+    set_default(log)
+    try:
+        result = await family_message_receive({"text": "吃饭了吗"})
+        assert result["status"] == "pending"
+        assert "已回复" not in result["speech"]
     finally:
         set_default(None)
         log.close()
@@ -391,6 +470,66 @@ async def test_family_query_low_confidence_not_urgent(tmp_path, monkeypatch):
     finally:
         set_default(None)
         log.close()
+
+
+async def test_family_query_string_false_does_not_trigger_fall(monkeypatch):
+    from actions import family_query
+    monkeypatch.setattr("skills.vision.grab_frame", lambda: _text_image())
+
+    async def fake_json_call(frame, prompt, schema, backend="cloud", scene_id=""):
+        return {"posture": "D", "on_floor": "false", "reply": "画面描述",
+                "confidence": 0.99, "uncertain": False}
+
+    monkeypatch.setattr("skills.vision.json_call", fake_json_call)
+    async def fake_send(*args, **kwargs):
+        return 1
+
+    monkeypatch.setattr("actions.family_query.notify.send", fake_send)
+    result = await family_query.family_status_answer({})
+    assert result["urgent"] is False
+
+
+async def test_family_query_invalid_confidence_does_not_crash(monkeypatch):
+    from actions import family_query
+    monkeypatch.setattr("skills.vision.grab_frame", lambda: _text_image())
+
+    async def fake_json_call(frame, prompt, schema, backend="cloud", scene_id=""):
+        return {"posture": "D", "on_floor": True, "reply": "画面描述",
+                "confidence": "unknown", "uncertain": False}
+
+    monkeypatch.setattr("skills.vision.json_call", fake_json_call)
+    async def fake_send(*args, **kwargs):
+        return 1
+
+    monkeypatch.setattr("actions.family_query.notify.send", fake_send)
+    result = await family_query.family_status_answer({})
+    assert result["urgent"] is False
+    assert result["confidence"] == 0.0
+
+
+async def test_photo_read_medication_structure(monkeypatch):
+    from actions import photo_ocr
+    monkeypatch.setattr("skills.vision.grab_frame", lambda: _text_image())
+
+    async def fake_json_call(frame, prompt, schema, backend="cloud", scene_id=""):
+        return {
+            "answer": "奶奶，这是降压药，一天吃一次，每次吃一片，记得饭后吃。",
+            "uncertain": False,
+            "drug_name": "硝苯地平控释片",
+            "dosage": "每次1片",
+            "frequency": "一日1次",
+            "usage_timing": "饭后",
+            "precautions": "整片吞服，不可嚼碎",
+        }
+
+    monkeypatch.setattr("skills.vision.json_call", fake_json_call)
+    result = await photo_ocr.photo_read({"text": "帮我看看这个药盒，这药怎么吃？"})
+    assert result["source"] == "vlm"
+    assert "降压药" in result["speech"]
+    assert "medication_info" in result
+    assert result["medication_info"]["drug_name"] == "硝苯地平控释片"
+    assert result["medication_info"]["dosage"] == "每次1片"
+    assert result["medication_info"]["frequency"] == "一日1次"
 
 
 # ---------- 真实 scenes/ 目录 ----------

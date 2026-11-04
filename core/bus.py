@@ -49,6 +49,8 @@ async def publish(event: Event) -> None:
             result = handler(event)
             if inspect.isawaitable(result):
                 await result
+        except asyncio.CancelledError:
+            print(f"[bus] 处理器 {getattr(handler, '__name__', handler)} 处理 {etype} 时被取消，继续派发后续订阅")
         except Exception:
             print(f"[bus] 处理器 {getattr(handler, '__name__', handler)} 处理 {etype} 时异常：")
             traceback.print_exc()

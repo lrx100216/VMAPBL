@@ -28,6 +28,12 @@ _pending: dict[str, str | None] = {"date": None}
 def reset_pending() -> None:
     """清升级链状态（测试用；跨天首检也会自动清）。"""
     _pending["date"] = None
+    try:
+        log = default_log()
+        if log is not None:
+            log.set_state_val("wakeup_pending_date", None)
+    except Exception:
+        pass
 
 
 def classify_wakeup(hist=None) -> str:
@@ -98,6 +104,16 @@ async def wakeup_check(ctx: dict) -> dict:
     from skills import tts
 
     today = date.today().isoformat()
+    if _pending["date"] is None:
+        try:
+            log = default_log()
+            if log is not None:
+                stored = log.get_state_val("wakeup_pending_date")
+                if stored and stored == today:
+                    _pending["date"] = stored
+        except Exception:
+            pass
+
     if _pending["date"] not in (None, today):
         reset_pending()  # 昨天的遗留链：新的一天从首检重新开始
 
@@ -109,6 +125,12 @@ async def wakeup_check(ctx: dict) -> dict:
         if verdict == "in_bed":
             await tts.speak("奶奶，早上好，该起床啦。")
             _pending["date"] = today  # 09:00 复查
+            try:
+                log = default_log()
+                if log is not None:
+                    log.set_state_val("wakeup_pending_date", today)
+            except Exception:
+                pass
             return {"phase": "first", "verdict": verdict, "act": "remind"}
         # 无法判断：当场语音确认，不升级、不置 pending（规范硬语义）
         end = await _voice_check(

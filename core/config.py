@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import os
+import stat
+import tempfile
 import threading
 from functools import lru_cache
 from pathlib import Path
@@ -34,6 +36,52 @@ def reload_settings() -> dict:
     return settings()
 
 
+def _replace_text(target: Path, content: str, mode: int) -> None:
+    fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            os.fchmod(stream.fileno(), mode)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, target)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def _write_yaml_atomic(target: Path, data, ryaml) -> None:
+    """Validate before replacing, retaining a validated previous version."""
+    import io
+
+    output = io.StringIO()
+    ryaml.dump(data, output)
+    content = output.getvalue()
+    if not isinstance(yaml.safe_load(content), dict):
+        raise ValueError("配置必须是 YAML 映射")
+    mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o600
+    if target.exists():
+        previous = target.read_text(encoding="utf-8")
+        if not isinstance(yaml.safe_load(previous), dict):
+            raise ValueError("现有配置无效，未覆盖或备份")
+        _replace_text(target.with_name(target.name + ".bak"), previous, 0o600)
+    _replace_text(target, content, mode)
+
+
+def restore_settings_backup(settings_path: Path | None = None) -> None:
+    """Restore the last valid backup after validating it, retaining the backup."""
+    target = settings_path or _SETTINGS_PATH
+    with _yaml_lock:
+        backup = target.with_name(target.name + ".bak")
+        content = backup.read_text(encoding="utf-8")
+        if not isinstance(yaml.safe_load(content), dict):
+            raise ValueError("备份配置无效，未恢复")
+        mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o600
+        _replace_text(target, content, mode)
+        if target == _SETTINGS_PATH:
+            reload_settings()
+
+
 def save_roi(name: str, points: list[list[int] | tuple[int, int]],
              settings_path: Path | None = None) -> list[list[int]]:
     """将多边形顶点写入 settings.yaml 的 roi.<name>（保留注释）并立即热刷新缓存。"""
@@ -52,9 +100,9 @@ def save_roi(name: str, points: list[list[int] | tuple[int, int]],
         if data.get("roi") is None:
             data["roi"] = {}
         data["roi"][name] = clean_pts
-        with open(target, "w", encoding="utf-8") as f:
-            ryaml.dump(data, f)
-        reload_settings()
+        _write_yaml_atomic(target, data, ryaml)
+        if target == _SETTINGS_PATH:
+            reload_settings()
     return clean_pts
 
 
@@ -74,9 +122,9 @@ def delete_roi(name: str, settings_path: Path | None = None) -> bool:
         if not isinstance(rois, dict) or name not in rois:
             return False
         del rois[name]
-        with open(target, "w", encoding="utf-8") as f:
-            ryaml.dump(data, f)
-        reload_settings()
+        _write_yaml_atomic(target, data, ryaml)
+        if target == _SETTINGS_PATH:
+            reload_settings()
     return True
 
 
@@ -93,9 +141,9 @@ def save_disabled_scenes(names: set[str], settings_path: Path | None = None) -> 
         else:
             data = {}
         data["disabled_scenes"] = sorted(names)
-        with open(target, "w", encoding="utf-8") as f:
-            ryaml.dump(data, f)
-        reload_settings()
+        _write_yaml_atomic(target, data, ryaml)
+        if target == _SETTINGS_PATH:
+            reload_settings()
     return sorted(names)
 
 
@@ -127,7 +175,7 @@ def video_source() -> "str | int":
 
 def butler_token() -> str:
     """家人端访问口令；为空时保持本机调试模式（生产部署必须设置）。"""
-    return os.getenv("BUTLER_TOKEN", "").strip()
+    return (os.getenv("BUTLER_TOKEN") or os.getenv("BUTLER_API_TOKEN") or "").strip()
 
 
 def dingtalk_sign_secret() -> str:

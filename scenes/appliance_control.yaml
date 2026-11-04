@@ -1,0 +1,16 @@
+# 场景9 · 智能家电语音控制（联动 Home Assistant）
+# 触发：语音提问/指令（intent=appliance 或 manual 调试触发）
+id: appliance_control
+name: 场景9 · 智能家电语音控制
+trigger:
+  - type: speech
+    intent: appliance
+  - type: manual            # 调试用：main.py --trigger appliance_control --text "开灯"
+condition:
+  - type: cooldown
+    seconds: 3              # 避免短时间内连续重复执行
+action:
+  - type: skill
+    name: appliance_control
+mode: single
+priority: 50

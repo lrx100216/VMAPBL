@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import math
 import stat
 from pathlib import Path
 from typing import Mapping
@@ -38,8 +39,29 @@ def production_issues(*, settings: Mapping | None = None,
     base = config.ROOT if root is None else Path(root)
     issues: list[str] = []
 
+    rois = cfg.get("roi") or {}
+    required_rois = ["bed", "door_inside"]
+    if (cfg.get("door") or {}).get("mode") != "proximity":
+        required_rois.append("door_outside")
+    for name in required_rois:
+        points = rois.get(name) if isinstance(rois, dict) else None
+        valid = (isinstance(points, list) and len(points) >= 3
+                 and all(isinstance(p, (list, tuple)) and len(p) == 2
+                         and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                                 and math.isfinite(v) for v in p)
+                         for p in points))
+        if valid:
+            area2 = sum(points[i][0] * points[(i + 1) % len(points)][1]
+                        - points[(i + 1) % len(points)][0] * points[i][1]
+                        for i in range(len(points)))
+            valid = math.isfinite(area2) and abs(area2) > 0
+        if not valid:
+            issues.append(f"缺少有效 ROI 标定：{name}")
+
     host = str((cfg.get("server") or {}).get("host", "127.0.0.1"))
-    if not str(values.get("BUTLER_TOKEN", "") or "").strip():
+    token = (str(values.get("BUTLER_TOKEN", "") or "").strip()
+             or str(values.get("BUTLER_API_TOKEN", "") or "").strip())
+    if not token:
         if host not in ("127.0.0.1", "localhost", "::1"):
             issues.append(f"非本机监听 {host} 必须设置 BUTLER_TOKEN")
         else:
@@ -50,6 +72,11 @@ def production_issues(*, settings: Mapping | None = None,
         "feishu": _text(values, cfg, "FEISHU_WEBHOOK", "notify", "feishu_webhook"),
         "generic": _text(values, cfg, "NOTIFY_WEBHOOK_URL", "notify", "webhook_url"),
     }
+    if str(values.get("DINGTALK_DIRECT_ENABLED", "")).lower() == "true":
+        required = ("DINGTALK_CLIENT_ID", "DINGTALK_CLIENT_SECRET", "DINGTALK_ROBOT_CODE", "DINGTALK_USER_ID")
+        channels["dingtalk_direct"] = all(str(values.get(name, "") or "").strip() for name in required)
+        if not channels["dingtalk_direct"]:
+            issues.append("钉钉单人通知缺少机器人凭据、RobotCode 或本人 UserId")
     if not any(channels.values()):
         issues.append("未配置任何家人通知渠道")
     if channels["dingtalk"] and not str(values.get("DINGTALK_SIGN_SECRET", "") or "").strip():

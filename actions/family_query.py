@@ -46,15 +46,18 @@ async def family_status_answer(ctx: dict) -> dict:
         return {"status": "error", "urgent": False}
     data = await vision.json_call(frame, _PROMPT, _SCHEMA,
                                   scene_id="family_query")
-    if data.get("uncertain"):
+    if data.get("uncertain") is not False:
         await notify.send("管家看了画面但看不太清，无法确定老人状态，建议电话联系一下。",
                           sender="管家", recipient="家人")
         return {"status": "uncertain", "urgent": False}
     reply = str(data.get("reply") or "").strip() or "画面已查看，暂无异常。"
     fall_conf = float(config.settings().get("family_query", {})
                       .get("fall_confidence", 0.75))
-    conf = float(data.get("confidence", 0) or 0)
+    try:
+        conf = float(data.get("confidence", 0) or 0)
+    except (TypeError, ValueError):
+        conf = 0.0
     fall_suspect = (str(data.get("posture")) == "D"
-                    and bool(data.get("on_floor")) and conf > fall_conf)
+                    and data.get("on_floor") is True and conf > fall_conf)
     await notify.send(reply, urgent=fall_suspect, sender="管家", recipient="家人")
     return {"status": "ok", "urgent": fall_suspect, "confidence": conf}

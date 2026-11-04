@@ -32,11 +32,36 @@ async def getup_decide(ctx: dict) -> str:
 
 @skill("console_blink")
 async def console_blink(ctx: dict) -> str:
-    """控制台闪烁：ANSI 反色整行打印 6 次（本机无继电器时的物理反馈替代）。"""
+    """起夜照明联动：优先联动 Home Assistant 点亮小夜灯；未接入时走控制台高亮物理替代。"""
+    try:
+        from skills import ha
+        ha_client = ha.default()
+        cfg = config.settings().get("homeassistant", {})
+        entity_id = (cfg.get("entities") or {}).get("night_light", "light.night_light")
+        brightness_pct = int(cfg.get("night_light_brightness_pct", 30))
+        if ha_client.is_available():
+            res = await ha_client.call_service(
+                domain="light",
+                service="turn_on",
+                service_data={"brightness_pct": brightness_pct},
+                target={"entity_id": entity_id},
+            )
+            if res.get("ok"):
+                return "ha_light_on"
+    except Exception:
+        pass
+
     line = "🔔 老人已起身，请注意"
     for _ in range(6):
         print(f"\033[7m{line}\033[0m", flush=True)
     return "blinked"
+
+
+@skill("night_light_on")
+async def night_light_on(ctx: dict) -> str:
+    """起夜照明联动显式别名。"""
+    return await console_blink(ctx)
+
 
 
 @skill("getup_notify")

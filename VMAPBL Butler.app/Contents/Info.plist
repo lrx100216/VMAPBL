@@ -7,7 +7,7 @@
     <key>CFBundleDisplayName</key>
     <string>VMAPBL 家庭守护</string>
     <key>CFBundleExecutable</key>
-    <string>launcher</string>
+    <string>VMAPBLButler</string>
     <key>CFBundleIdentifier</key>
     <string>local.vmapbl.butler</string>
     <key>CFBundleInfoDictionaryVersion</key>
@@ -24,5 +24,7 @@
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>用于连接家中的 RTSP 摄像头，进行跌倒与活动状态识别。</string>
 </dict>
 </plist>

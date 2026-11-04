@@ -55,6 +55,42 @@ action:
     assert calls == ["family.msg_to_elder"]
 
 
+async def test_wire_vla_connects_state_triggers(tmp_path):
+    """验证 VLA 模式接线连接 state 触发器（AUDIT-012）。"""
+    from main import _wire_vla
+
+    scenes = tmp_path / "scenes"
+    scenes.mkdir()
+    (scenes / "door.yaml").write_text("""
+id: door_key
+name: 钥匙提醒
+trigger:
+  - type: state
+    entity: occupancy
+    to: "on"
+action:
+  - type: skill
+    name: rec
+""", encoding="utf-8")
+    calls = []
+
+    async def rec(ctx):
+        calls.append("triggered")
+
+    engine = SceneEngine(scenes, StateStore(), EventLog(tmp_path / "t.db"),
+                         skills={"rec": rec})
+    _wire_vla(engine)
+    try:
+        await bus.publish({
+            "type": "state.occupancy",
+            "payload": {"entity": "occupancy", "old": False, "new": True}
+        })
+    finally:
+        engine.unwire()
+    assert calls == ["triggered"]
+
+
+
 async def test_heartbeat_loop_writes_and_stops(tmp_path, monkeypatch):
     from main import _heartbeat_loop
     from core.heartbeat import read_heartbeat

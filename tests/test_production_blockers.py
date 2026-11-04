@@ -107,7 +107,7 @@ def _rect_frame():
     return frame
 
 
-async def test_sentinel_frozen_frame_does_not_freeze_quiet_detection():
+async def test_sentinel_frozen_frame_does_not_fabricate_sudden_still():
     sentinel = EdgeSentinel(fps=1000.0, sustained_quiet_s=0.001,
                             high_motion_threshold=0.01, spike_window_s=1.0)
     seen = []
@@ -119,8 +119,7 @@ async def test_sentinel_frozen_frame_does_not_freeze_quiet_detection():
                        on_event_callback=on_event, fps=1000.0,
                        sentinel=sentinel, max_iterations=5)
     sudden = [obs for obs in seen if obs.trigger_reason == "sudden_still"]
-    assert sudden
-    assert sudden[0].frame is None  # 冻结后的告警不得把旧图当成当前画面
+    assert not sudden  # 没有新图像证据时不得把断流解释成跌倒
 
 
 async def test_sentinel_time_trigger_advances_on_frozen_frame():

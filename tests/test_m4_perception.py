@@ -325,7 +325,7 @@ async def test_perception_walk_in_still_leave():
 
 
 async def test_perception_empty_room_never_occupied():
-    """全程空场：occupancy 不变 on，也不产生姿态调用（省电闸门的意义）。"""
+    """全程空场也做低频姿态检查，但不会错误标记有人。"""
     from sensors.perception import run_perception
     frames = [(i * 0.1, _frame_with_rect()) for i in range(1, 11)]
     pose = _FakePose()
@@ -340,6 +340,77 @@ async def test_perception_empty_room_never_occupied():
     finally:
         bus.clear_subscriptions()
     assert st.occupancy is False and pose.calls == 0
+
+
+async def test_perception_detects_stationary_person_without_motion():
+    """启动时人已静止，运动门关闭也要主动检查。"""
+    from sensors.perception import run_perception
+
+    class StillGate:
+        warming_up = False
+
+        def apply(self, frame):
+            return False, 0.0
+
+    class PersonPose:
+        loaded_path = __import__("pathlib").Path("fake")
+
+        def infer(self, frame):
+            from types import SimpleNamespace
+            return [SimpleNamespace(bbox=(0, 0, 30, 30))]
+
+    st = StateStore()
+    frames = [(i * 0.1, _frame_with_rect()) for i in range(1, 71)]
+    await run_perception(camera=_FakeCamera(frames), gate=StillGate(),
+                         pose=PersonPose(), occ=OccupancyTracker(3),
+                         still=StillDetector(60), st=st, echo=False)
+    assert st.occupancy is True
+
+
+async def test_door_approach_fires_on_entry_not_occupancy_change(monkeypatch):
+    from core import config
+    from sensors.perception import run_perception
+
+    monkeypatch.setattr(config, "settings", lambda: {
+        "door": {"mode": "proximity"},
+        "roi": {"door_inside": [[20, 20], [60, 20], [60, 60], [20, 60]]},
+    })
+
+    class Gate:
+        warming_up = False
+        def apply(self, frame):
+            return True, 0.2
+
+    class Pose:
+        loaded_path = Path("test")
+        def __init__(self):
+            self.count = 0
+        def infer(self, frame):
+            self.count += 1
+            # Occupied throughout; walk into, remain, leave, and enter again.
+            x = 40 if self.count in (3, 4, 5, 6, 11, 12) else 5
+            return [PersonPose(bbox=np.array([x-2, 5, x+2, 40]),
+                               keypoints=np.zeros((17, 2)),
+                               kconf=np.ones(17), conf=1)]
+
+    events = []
+    async def collect(e):
+        events.append(e)
+
+    bus.clear_subscriptions()
+    bus.subscribe("door.approach", collect)
+    try:
+        frames = [(float(i), _frame_with_rect()) for i in range(1, 13)]
+        st = StateStore()
+        await run_perception(camera=_FakeCamera(frames), gate=Gate(), pose=Pose(),
+                             occ=OccupancyTracker(3), still=StillDetector(60),
+                             st=st, pose_interval_s=0.1, echo=False)
+        await asyncio.sleep(0.05)
+    finally:
+        bus.clear_subscriptions()
+    assert st.occupancy is True
+    assert len(events) == 2
+    assert [e["ts"] for e in events] == [4.0, 12.0]
 
 
 async def test_perception_pose_interval_comes_from_settings(monkeypatch):
@@ -406,3 +477,17 @@ def test_calibrate_save_preserves_comments(tmp_path, monkeypatch):
     data = yaml.safe_load(text)
     assert data["roi"]["bed"] == [[10, 20], [100, 20], [100, 200]]
     assert data["global"]["db_path"] == "data/x.db"  # 其他分区原样
+
+
+def test_crumpled_fall_occupancy_hold():
+    """验证跌倒蜷缩导致姿态丢失时，闸门2仍能依据突变窗口前的人形驻留触发判定。"""
+    occ = OccupancyTracker(hold_s=3.0)
+    # 人在 t=10.0 时确认过
+    occ.note_person(now=10.0, seen=True)
+    # 在 t=14.0 时进入静止（突变发生在 t=11.0~13.0），此时离最后识别人形已过去 4 秒 (> hold_s)
+    quiet_since = 14.0
+    spike_window_s = 2.0
+    # 旧单点 occupied(14.0) 为 False
+    assert occ.occupied(quiet_since) is False
+    # 但突变区间 [12.0, 14.0] 仍在人形驻留扩展区间内
+    assert occ.occupied_during(quiet_since - spike_window_s, quiet_since) is True

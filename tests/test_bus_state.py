@@ -68,3 +68,21 @@ async def test_mark_medication_publishes():
     assert s.medication_taken["morning"] is True
     assert received[0]["payload"]["entity"] == "medication_taken"
     assert received[0]["payload"]["slot"] == "morning"
+
+
+async def test_bus_cancelled_handler_does_not_drop_subsequent_subscribers():
+    """验证单个订阅者抛出 CancelledError 不会阻断后续订阅者接收事件（AUDIT-017）。"""
+    executed = []
+
+    async def bad_handler(_e):
+        executed.append("bad")
+        raise asyncio.CancelledError()
+
+    async def good_handler(_e):
+        executed.append("good")
+
+    bus.subscribe("test.cancel", bad_handler)
+    bus.subscribe("test.cancel", good_handler)
+
+    await bus.publish({"type": "test.cancel", "payload": {}})
+    assert executed == ["bad", "good"]

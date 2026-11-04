@@ -123,3 +123,102 @@ def test_camera_stop_keeps_handle_when_thread_does_not_exit():
     assert cap.released is False
     assert cam._thread is not None
     assert cam.started is True  # 不允许误以为已停止后再开第二条采集线程
+
+
+async def test_sentinel_high_risk_callback_preempts_ordinary_backlog():
+    class ScriptedCamera:
+        source_is_stream = False
+        source_is_file = True
+        started = True
+
+        def __init__(self):
+            self.idx = 0
+            self.eof = False
+
+        def latest(self):
+            if self.idx >= 3:
+                self.eof = True
+                return None
+            self.idx += 1
+            return float(self.idx), np.zeros((8, 8, 3), dtype=np.uint8)
+
+        def ring(self):
+            return []
+
+    camera = ScriptedCamera()
+    sentinel = EdgeSentinel(fps=1000.0)
+    batches = iter((["motion_start"], ["audio_activity"], ["sudden_still"]))
+    sentinel.process_frame = lambda frame, ts=None: (False, 0.0, next(batches, []))
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    handled = []
+
+    async def callback(obs):
+        handled.append(obs.trigger_reason)
+        if len(handled) == 1:
+            first_started.set()
+            await release_first.wait()
+
+    task = asyncio.create_task(run_sentinel(
+        camera=camera, on_event_callback=callback, fps=1000.0, sentinel=sentinel))
+    await asyncio.wait_for(first_started.wait(), timeout=1.0)
+    for _ in range(100):
+        if camera.idx >= 3:
+            break
+        await asyncio.sleep(0.005)
+    assert camera.idx >= 3
+    release_first.set()
+    await asyncio.wait_for(task, timeout=1.0)
+    assert handled == ["motion_start", "sudden_still", "audio_activity"]
+
+
+async def test_sentinel_high_risk_events_survive_full_callback_queue(monkeypatch):
+    class ScriptedCamera:
+        source_is_stream = False
+        source_is_file = True
+        started = True
+
+        def __init__(self):
+            self.idx = 0
+            self.eof = False
+
+        def latest(self):
+            if self.idx >= 4:
+                self.eof = True
+                return None
+            self.idx += 1
+            return float(self.idx), np.zeros((8, 8, 3), dtype=np.uint8)
+
+        def ring(self):
+            return []
+
+    monkeypatch.setattr(config, "settings", lambda: {
+        "sentinel": {"callback_queue_size": 2}})
+    camera = ScriptedCamera()
+    sentinel = EdgeSentinel(fps=1000.0)
+    batches = iter((["motion_start"], ["sudden_still"],
+                    ["audio_activity"], ["fall"]))
+    sentinel.process_frame = lambda frame, ts=None: (False, 0.0, next(batches, []))
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    handled = []
+
+    async def callback(obs):
+        handled.append(obs.trigger_reason)
+        if len(handled) == 1:
+            first_started.set()
+            await release_first.wait()
+
+    task = asyncio.create_task(run_sentinel(
+        camera=camera, on_event_callback=callback, fps=1000.0, sentinel=sentinel))
+    await asyncio.wait_for(first_started.wait(), timeout=1.0)
+    for _ in range(100):
+        if camera.idx >= 4:
+            break
+        await asyncio.sleep(0.005)
+    assert camera.idx >= 4
+    await asyncio.sleep(0.02)  # 让采集端在回调仍阻塞时进入满队列收尾
+    release_first.set()
+    stats = await asyncio.wait_for(task, timeout=1.0)
+    assert handled == ["motion_start", "sudden_still", "fall"]
+    assert stats["dropped_events"] == 1

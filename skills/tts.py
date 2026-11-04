@@ -12,12 +12,27 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Awaitable, Callable
 
 from core import config
 from core.state import state
 
 _lock = asyncio.Lock()
+_current_task: asyncio.Task | None = None
+_current_urgent: bool = False
+
+
+def _get_lock() -> asyncio.Lock:
+    """获取与当前运行中的事件循环绑定的锁，防止跨测试用例的 event loop 泄漏。"""
+    global _lock
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return _lock
+    if _lock is None or getattr(_lock, "_loop", None) not in (None, loop):
+        _lock = asyncio.Lock()
+    return _lock
 
 
 def _tts_settings() -> dict:
@@ -37,8 +52,8 @@ async def _spawn_say(text: str) -> None:
     timeout_s = float(cfg.get("timeout_s", 60.0))
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout_s)
-    except asyncio.TimeoutError:
-        # 先终止子进程再等待回收，随后由 speak() 统一释放半双工状态
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        # 超时或取消都必须先终止并回收子进程，随后由 speak() 释放半双工状态
         try:
             proc.kill()
         except ProcessLookupError:
@@ -51,23 +66,45 @@ async def _spawn_say(text: str) -> None:
 _runner: Callable[[str], Awaitable[None]] = _spawn_say
 
 
-async def speak(text: str) -> None:
-    """播报一段文本。互斥排队；空文本直接忽略；绝不抛异常到场景层。"""
-    text = (text or "").strip()[:200]  # 防止长文本长时间占用麦克风与播报锁
+async def speak(text: str, *, urgent: bool = False) -> None:
+    """播报一段文本。互斥排队；紧急播报可抢占非紧急播报；空文本直接忽略；绝不抛异常到场景层。"""
+    global _current_task, _current_urgent
+    # 防命令注入（AUDIT-008）：过滤 Apple Speech [[slnc ...]] 等嵌入命令
+    text = re.sub(r"\[\[.*?\]\]", "", text or "").strip()[:200]
     if not text:
         return
-    tail_s = float(_tts_settings().get("tail_silence_ms", 400)) / 1000.0
-    async with _lock:
-        state.set("speaking", True)
-        try:
-            await _runner(text)
-        except Exception as e:
-            print(f"[tts] 播报失败（{type(e).__name__}: {e}）：{text[:40]}")
-        finally:
+
+    # 紧急插话抢占（AUDIT-018）：紧急播报中断正在播放的非紧急播报
+    if urgent and _current_task is not None and not _current_task.done() and not _current_urgent:
+        _current_task.cancel()
+
+    current = asyncio.current_task()
+    try:
+        async with _get_lock():
+            _current_task = current
+            _current_urgent = urgent
+            tail_s = float(_tts_settings().get("tail_silence_ms", 400)) / 1000.0
+            state.set("speaking", True)
             try:
-                # 尾静默也可能被取消；复位后再传播取消，不能吞掉关停信号
-                await asyncio.sleep(tail_s)
+                await _runner(text)
             except asyncio.CancelledError:
-                state.set("speaking", False)
                 raise
-            state.set("speaking", False)
+            except Exception as e:
+                print(f"[tts] 播报失败（{type(e).__name__}: {e}）：{text[:40]}")
+            finally:
+                if _current_task is current:
+                    _current_task = None
+                    _current_urgent = False
+                try:
+                    await asyncio.sleep(tail_s)
+                except asyncio.CancelledError:
+                    state.set("speaking", False)
+                    raise
+                state.set("speaking", False)
+    except asyncio.CancelledError:
+        # 当前任务在排队或播报期间被取消时确保 speaking 状态复位并向外传播取消
+        state.set("speaking", False)
+        if _current_task is current:
+            _current_task = None
+            _current_urgent = False
+        raise

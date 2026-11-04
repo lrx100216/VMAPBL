@@ -134,9 +134,9 @@
         <button class="btn sm accent" id="roiSaveBtn" style="display:none;">💾 保存多边形</button>
         <button class="btn sm" id="roiCancelBtn" style="display:none;">取消</button>
         <button class="btn sm" id="roiClearBtn" title="清除当前选中区域的多边形">🗑️ 清空该区</button>
-        <button class="btn sm" id="roiAutoBtn" title="使用视觉大模型自动标定门内、门外、床区">✨ AI 自动标定</button>
+        <button class="btn sm" id="roiAutoBtn" title="生成当前区域的草稿，需人工检查后保存">✨ AI 标定草稿</button>
       </div>
-      <div class="roi-hint" id="roiHint">已标定多边形会自动叠加显示在画面上；支持手动画点或 AI 一键标定（热生效，无需重启）。</div>
+        <div class="roi-hint" id="roiHint">已标定区域显示在画面上；AI 草稿须检查后手动保存。</div>
     </div>
 
     <div class="card">
@@ -184,7 +184,7 @@ const MEDS = [["morning", "早"], ["noon", "中"], ["evening", "晚"]];
 function renderState(s) {
   const pill = (cond, onTxt, offTxt) => cond
     ? `<span class="pill ok">${onTxt}</span>` : `<span class="pill wait">${offTxt}</span>`;
-  $("v-occupancy").innerHTML = pill(s.occupancy, "有人", "无人");
+  $("v-occupancy").innerHTML = pill(s.occupancy, "检测到人", "未检测到人");
   $("v-lastmotion").textContent = fmtTime(s.last_motion_ts);
   $("v-still").innerHTML = pill(s.is_still, "已静止", "活动中");
   $("v-speaking").innerHTML = pill(s.speaking, "播报中", "空闲");
@@ -387,7 +387,7 @@ function setDrawingMode(on) {
   $("roiCancelBtn").style.display = on ? "" : "none";
   $("roiHint").textContent = on
     ? `正在标定「${$("roiSelect").value}」：在画面上左键点击添加顶点（至少 3 个），点「保存多边形」生效。`
-    : "已标定多边形会自动叠加显示在画面上；支持手动画点或 AI 一键标定（热生效，无需重启）。";
+    : "已标定区域显示在画面上；AI 草稿须检查后手动保存。";
   renderRoiCanvas();
 }
 
@@ -436,16 +436,19 @@ $("roiAutoBtn").onclick = async () => {
   btn.disabled = true;
   btn.textContent = "⏳ AI 识别中…";
   try {
-    const r = await postJSON("/api/roi_auto", {});
+    const name = $("roiSelect").value;
+    const r = await postJSON("/api/roi_auto", { targets: [name] });
     savedRois = r.roi || {};
-    setDrawingMode(false);
+    setDrawingMode(true);
+    draftPts = r.calibrated[name] || [];
+    $("roiHint").textContent = "请检查草稿是否准确；确认后点击保存，不准确请取消并手动画点。";
     renderRoiCanvas();
-    toast("AI 自动标定完成，已实时生效 ✨");
+    toast("草稿尚未保存，请检查后确认");
   } catch (e) {
     toast("AI 自动标定失败（请检查画面或网络）");
   } finally {
     btn.disabled = false;
-    btn.textContent = "✨ AI 自动标定";
+    btn.textContent = "✨ AI 标定草稿";
   }
 };
 

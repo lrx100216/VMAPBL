@@ -11,8 +11,10 @@ from actions import skill
 from core import config
 from skills import ocr, vision
 
-_VLM_SCHEMA = {"answer": "用一句中文回答老人的问题",
-               "uncertain": "true/false：画面看不清或没有相关文字时为 true"}
+_VLM_SCHEMA = {
+    "answer": "用一句中文回答老人的问题",
+    "uncertain": "true/false：画面看不清或没有相关文字时为 true",
+}
 _VLM_PROMPT = """你是独居老人的随身读字助手。观察这张照片，回答老人的问题。
 
 硬性要求：
@@ -24,10 +26,31 @@ _VLM_PROMPT = """你是独居老人的随身读字助手。观察这张照片，
 
 老人的问题：{question}"""
 
+_VLM_MEDICATION_SCHEMA = {
+    "answer": "用一句亲切大白话告诉老人：药名、每次吃几片/几粒、一天吃几次，50字以内",
+    "uncertain": "true/false：画面看不清或没有相关文字时为 true",
+    "drug_name": "药品名称（如阿司匹林肠溶片，未知填空）",
+    "dosage": "每次用量（如每次1片）",
+    "frequency": "频次（如一日1次）",
+    "usage_timing": "服用时机（如饭后半小时）",
+    "precautions": "注意事项（如孕妇禁用、温水送服）",
+}
+_VLM_MEDICATION_PROMPT = """你是独居老人的随身用药读字助手。观察这张照片中的药盒、药瓶或药品说明书，回答老人的问题。
+
+硬性要求：
+- 必须准确，只依据画面里真实存在的内容，绝不编造画面中不存在的用法用量；
+- 看不清、没有文字或与问题无关时，uncertain 给 true，answer 说明看不清；
+- 答案 answer 必须亲切通俗，重点讲清楚：药名、每次吃几片/几粒、一天吃几次；
+- 照片里可能有本地 OCR 先读出的文字（可能不全，仅供参考，以你看到的为准）。
+
+本地 OCR 读到的内容：{ocr_text}
+
+老人的问题：{question}"""
+
 
 @skill("photo_read")
 async def photo_read(ctx: dict) -> dict:
-    """场景8 动作：抓帧 → OCR 优先 → 必要时升 VLM。返回 {status, speech}。"""
+    """场景8 动作：抓帧 → OCR 优先 → 必要时升 VLM（支持药盒/说明书结构化提取）。"""
     question = (ctx.get("text") or "这上面写的什么").strip()
     frame = vision.grab_frame()
     if frame is None:
@@ -41,13 +64,26 @@ async def photo_read(ctx: dict) -> dict:
         return {"status": "ok", "source": "ocr", "speech": f"上面写着：{text}"}
     # 语义问题，或想读但 OCR 没读到（手写字/光线差）→ 升 L3 云端
     ocr_hint = "；".join(t for t, _c in lines) if lines else "（无）"
+    is_medication = any(k in question for k in ("药", "吃法", "用量", "几次", "几粒", "几颗", "说明书", "饭前", "饭后"))
+    prompt = _VLM_MEDICATION_PROMPT if is_medication else _VLM_PROMPT
+    schema = _VLM_MEDICATION_SCHEMA if is_medication else _VLM_SCHEMA
+
     data = await vision.json_call(
-        frame, _VLM_PROMPT.format(ocr_text=ocr_hint, question=question),
-        _VLM_SCHEMA, scene_id="photo_ocr")
+        frame, prompt.format(ocr_text=ocr_hint, question=question),
+        schema, scene_id="photo_ocr")
     if data.get("uncertain"):
         return {"status": "uncertain",
                 "speech": "奶奶，这个我看不太清，能把纸举近一点、光线亮一点再问我吗？"}
     answer = str(data.get("answer") or "").strip()
     if not answer:
         return {"status": "uncertain", "speech": "奶奶，我没看到上面有字。"}
-    return {"status": "ok", "source": "vlm", "speech": answer}
+    res: dict = {"status": "ok", "source": "vlm", "speech": answer}
+    if is_medication and any(data.get(k) for k in ("drug_name", "dosage", "frequency")):
+        res["medication_info"] = {
+            "drug_name": data.get("drug_name"),
+            "dosage": data.get("dosage"),
+            "frequency": data.get("frequency"),
+            "usage_timing": data.get("usage_timing"),
+            "precautions": data.get("precautions"),
+        }
+    return res

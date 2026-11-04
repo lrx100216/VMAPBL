@@ -18,7 +18,8 @@ from core.log import EventLog
 from core.scene_engine import SceneEngine
 from core.state import StateStore
 from server.app import create_app
-from server.webhook_auth import dingtalk_signature, feishu_signature
+from server.webhook_auth import (
+    clear_nonce_cache, dingtalk_signature, feishu_signature, verify_webhook)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -28,8 +29,10 @@ def _clean(monkeypatch):
     monkeypatch.delenv("BUTLER_TOKEN", raising=False)
     monkeypatch.delenv("DINGTALK_SIGN_SECRET", raising=False)
     monkeypatch.delenv("FEISHU_SIGN_SECRET", raising=False)
+    clear_nonce_cache()
     yield
     bus.clear_subscriptions()
+    clear_nonce_cache()
 
 
 def _app(tmp_path):
@@ -92,6 +95,24 @@ async def test_dingtalk_callback_signature(tmp_path, monkeypatch):
                                      "sign": dingtalk_signature("dt-secret", ts)})
         assert good.status_code == 200
     # 失败的请求不得产生任何播报事件
+    assert len(events) == 1
+
+
+async def test_stream_gateway_signed_message_routes_only_once(tmp_path, monkeypatch):
+    from tools.dingtalk_stream_gateway import compute_dingtalk_headers
+
+    monkeypatch.setenv("BUTLER_TOKEN", "test-console-token")
+    monkeypatch.setenv("DINGTALK_SIGN_SECRET", "test-stream-secret")
+    events = []
+    bus.subscribe("family.msg_to_elder", lambda event: events.append(event))
+    body = json.dumps({"text": "这是一条本地测试留言"}).encode()
+    headers = compute_dingtalk_headers("test-stream-secret", body)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=_app(tmp_path)),
+                                 base_url="http://test") as client:
+        path = "/api/webhook/family_reply"
+        assert (await client.post(path, content=body + b" ", headers=headers)).status_code == 401
+        assert (await client.post(path, content=body, headers=headers)).status_code == 200
+        assert (await client.post(path, content=body, headers=headers)).status_code == 401
     assert len(events) == 1
 
 
@@ -162,3 +183,59 @@ async def test_feishu_url_verification_with_signature(tmp_path, monkeypatch):
                             headers=headers)
         assert resp.status_code == 200
         assert resp.json() == {"challenge": "challenge-123"}
+
+
+@pytest.mark.parametrize("headers,secrets", [
+    ({"timestamp": "1"}, {"feishu_secret": "configured-secret"}),
+    ({"x-lark-signature": "unsigned"}, {"dingtalk_secret": "configured-secret"}),
+])
+def test_other_platform_headers_cannot_bypass_configured_signature(
+        headers, secrets):
+    ok, _reason = verify_webhook(
+        headers, '{"text":"伪造留言"}'.encode("utf-8"), **secrets)
+    assert ok is False
+
+
+async def test_webhook_fails_closed_when_butler_token_set_and_secrets_unset(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("BUTLER_TOKEN", "prod-token")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=_app(tmp_path)),
+                                 base_url="http://test") as c:
+        resp = await c.post("/api/webhook/family_reply",
+                            json={"text": "伪造消息"})
+        assert resp.status_code == 401
+        assert resp.json()["detail"] == "webhook_secrets_unconfigured"
+
+
+def test_webhook_replay_protection_rejects_duplicate():
+    """验证重放相同请求被拒绝（AUDIT-020）。"""
+    secret = "test-secret"
+    ts = str(int(time.time()))
+    nonce = "unique-nonce-1"
+    body = b'{"text":"hello"}'
+    sig = feishu_signature(secret, ts, nonce, body)
+    headers = {
+        "x-lark-signature": sig,
+        "x-lark-request-timestamp": ts,
+        "x-lark-request-nonce": nonce,
+    }
+
+    # 首次校验成功
+    ok1, reason1 = verify_webhook(headers, body, feishu_secret=secret)
+    assert ok1 is True
+    assert reason1 == "ok"
+
+    # 重放相同请求被拦截
+    ok2, reason2 = verify_webhook(headers, body, feishu_secret=secret)
+    assert ok2 is False
+    assert reason2 == "feishu_request_replayed"
+
+
+async def test_cross_origin_mutation_rejected(tmp_path):
+    """验证非法来源的跨域 POST 请求被 403 拦截（AUDIT-019）。"""
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=_app(tmp_path)),
+                                 base_url="http://test") as c:
+        resp = await c.post("/api/msg_to_elder", json={"text": "测试"},
+                            headers={"Origin": "https://malicious-site.com"})
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "cross_origin_forbidden"

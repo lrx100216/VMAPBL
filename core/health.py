@@ -41,10 +41,14 @@ def readiness(*, camera=None, log=None, pose=None,
 
     if log is not None:
         try:
+            from skills.notify import configured_channel_names
             health = log.notification_health()
-            checks["notify"] = (health["pending_count"] == 0
+            configured_channels = len(configured_channel_names())
+            checks["notify"] = (configured_channels > 0
+                                and health["pending_count"] == 0
                                 and health["dead_count"] == 0)
-            details["notify"] = health
+            details["notify"] = {
+                **health, "configured_channels": configured_channels}
         except Exception as e:
             checks["notify"] = False
             details["notify"] = {"error": type(e).__name__}

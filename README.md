@@ -1,9 +1,23 @@
 # VMAPBL · 本地 AI 管家
 
+> 当前部署提示（2026-11-04）：先在实际摄像头画面中标定 `bed`、
+> `door_inside`、`door_outside`，并执行 `--require-production` 检查。
+> 服药视觉结果只表示可能接触药物，需语音确认才记录为已服药；实际吞服、
+> OCR、通知送达、跌倒识别和设备联动仍须现场验证，不能仅凭自动化测试认定可靠。
+
+配置通过控制台或标定工具保存时，系统会在 `config/settings.yaml.bak` 保留上一份有效配置。
+需要回退时，运行 `./.venv/bin/python tools/restore_settings.py`；恢复后请重新检查标定和通知设置。
+
 运行在 MacBook Air M2 上的多模态养老守护系统：本地廉价感知（OpenCV/YOLO）
 + 云端按需理解（DeepSeek 视觉模型），单进程 asyncio，macOS 原生音视频。
 
 ## 双击启动（macOS）
+
+钉钉企业机器人单人通知支持在 `.env` 中显式设置
+`DINGTALK_DIRECT_ENABLED=true`、`DINGTALK_ROBOT_CODE` 和本人的
+`DINGTALK_USER_ID`，并使用已有 Client ID/Secret。此渠道默认关闭；启用前须核实
+本人接收标识、钉钉发送权限及待发送的历史记录，防止通知发错或补发旧消息。
+接口接受回执不代表手机已看到或用户已读。首次使用需由本人进行真实收发验收。
 
 在 Finder 打开项目目录，双击 **`VMAPBL Butler.app`**：
 
@@ -328,6 +342,12 @@ curl -s -H "Authorization: Bearer 你的口令" http://127.0.0.1:8321/api/state
 
 家人端页面可用 `http://127.0.0.1:8321/?token=你的口令` 打开；没带 token 时，
 接口返回 401 会弹窗要求输入口令。
+
+钉钉 Stream 接收可以在 Mac 上单独运行。启用机器人 Stream 模式后，把
+`DINGTALK_CLIENT_ID`、`DINGTALK_CLIENT_SECRET` 和 `DINGTALK_SIGN_SECRET`
+填入项目的 `.env`，安装 `dingtalk-stream`，然后在守护服务启动后运行
+`./.venv/bin/python tools/dingtalk_stream_gateway.py`。Stream 负责接收家人消息。
+老人主动发消息、状态回复和告警使用 `DINGTALK_WEBHOOK` 配置的出站渠道。
 
 **第一批安全切片（2026-10-29）**。
 

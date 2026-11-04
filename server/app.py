@@ -69,14 +69,35 @@ def state_snapshot(state: StateStore) -> dict:
 def create_app(*, state: StateStore, engine: SceneEngine, log,
                hub: PushHub | None = None) -> FastAPI:
     """装配家人端应用。hub 缺省时新建（订阅 notify.family + state.*）。"""
+    from fastapi.middleware.cors import CORSMiddleware
+    from core import config
+    from server.auth import api_authorized, origin_allowed
+
     hub = hub or PushHub()
     app = FastAPI(title="本地 AI 管家 · 家人端", docs_url=None, redoc_url=None)
     app.state.hub = hub  # 测试/运维检查活跃连接数用
 
+    server_cfg = config.settings().get("server") or {}
+    allowed_origins = list(server_cfg.get("allowed_origins") or [
+        "http://127.0.0.1:8321", "http://localhost:8321",
+        "http://127.0.0.1", "http://localhost"
+    ])
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+    )
+
     @app.middleware("http")
     async def require_api_token(request: Request, call_next):
-        """BUTLER_TOKEN 设置后，家人端 API 一律要 token；回调走平台签名。"""
-        from server.auth import api_authorized
+        """BUTLER_TOKEN 设置后，家人端 API 一律要 token；回调走平台签名；跨域变异请求检查 Origin。"""
+        if request.method in ("POST", "DELETE", "PUT", "PATCH"):
+            origin = request.headers.get("origin")
+            if origin and not origin_allowed(origin, allowed_origins):
+                return JSONResponse({"detail": "cross_origin_forbidden"}, status_code=403)
+
         path = request.url.path
         if path.startswith("/api/") and not path.startswith("/api/webhook/"):
             if not api_authorized(request):
@@ -103,10 +124,10 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
         from core.health import readiness
         from sensors.camera import get_current
         from sensors.pose import get_current_pose
-        from skills.notify import get_webhook_urls
+        from skills.notify import configured_channel_names
         ready, snap = readiness(camera=get_current(), log=log,
                                 pose=get_current_pose())
-        snap["notify_channels"] = sum(1 for u in get_webhook_urls().values() if u)
+        snap["notify_channels"] = len(configured_channel_names())
         return JSONResponse(snap, status_code=200 if ready else 503)
 
     @app.get("/api/state")
@@ -177,6 +198,16 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
     @app.get("/api/messages")
     async def api_messages(limit: int = 30) -> list[dict]:
         return log.list_messages(limit=max(1, min(limit, 200)))
+
+    @app.post("/api/notifications/requeue-dead")
+    async def api_requeue_dead_notifications() -> dict:
+        """人工确认故障已恢复后重投 dead；接口由统一 API token 中间件保护。"""
+        return {"ok": True, "requeued": log.requeue_dead_notifications()}
+
+    @app.post("/api/notifications/clear-dead")
+    async def api_clear_dead_notifications() -> dict:
+        """人工确认清除死信记录并解除 /readyz 锁定；接口由统一 API token 中间件保护。"""
+        return {"ok": True, "cleared": log.clear_dead_notifications()}
 
     @app.get("/api/scenes")
     async def api_scenes() -> list[dict]:
@@ -367,7 +398,7 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
 
     @app.post("/api/roi_auto")
     async def api_roi_auto(body: dict = Body(default={})) -> dict:
-        """使用视觉大模型自动标定 ROI 多边形并热重载。"""
+        """生成需人工检查的 ROI 草稿，不更改配置。"""
         from core import config
         from tools.calibrate_roi import DEFAULT_TARGETS, auto_calibrate_rois
         raw_targets = body.get("targets")
@@ -376,7 +407,7 @@ def create_app(*, state: StateStore, engine: SceneEngine, log,
         else:
             targets = DEFAULT_TARGETS
         try:
-            calibrated = await auto_calibrate_rois(targets=targets, save=True)
+            calibrated = await auto_calibrate_rois(targets=targets, save=False)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"AI 自动标定失败: {e}")
         roi = config.settings().get("roi") or {}

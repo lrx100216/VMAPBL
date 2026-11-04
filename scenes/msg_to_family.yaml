@@ -17,6 +17,10 @@ action:
         do:
           - type: speak
             expr: "result['speech']"
+      - when: "result['status'] == 'pending' or result['status'] == 'undelivered'"
+        do:
+          - type: speak
+            expr: "result['speech']"
       - when: "result['status'] == 'no_recipient'"
         do:
           - type: speak

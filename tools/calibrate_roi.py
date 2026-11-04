@@ -95,9 +95,9 @@ async def auto_calibrate_rois(
     frame: np.ndarray | None = None,
     targets: tuple[str, ...] = DEFAULT_TARGETS,
     *,
-    save: bool = True,
+    save: bool = False,
 ) -> dict[str, list[list[int]]]:
-    """用视觉大模型自动识别房间中的门内/门外/床区多边形并写入 settings.yaml。"""
+    """生成待人工复核的多边形建议；不允许直接写入配置。"""
     if frame is None:
         frame = vision.grab_frame()
     if frame is None:
@@ -109,7 +109,7 @@ async def auto_calibrate_rois(
         "1. door_inside：门内侧地面/玄关落脚区域（人进门后站立的区域）\n"
         "2. door_outside：房门/门口外侧区域（人出门迈向的区域）\n"
         "3. bed：床铺或沙发躺卧休息区域\n"
-        "如果某个区域在画面中看不清，请根据房间布局给出最合理的估计区域。"
+        "如果某个区域看不清，返回空数组，不要猜测。"
     )
     schema = {
         "door_inside": "[[x1,y1],[x2,y2],[x3,y3],[x4,y4]] (0..1000 归一化坐标)",
@@ -117,20 +117,16 @@ async def auto_calibrate_rois(
         "bed": "[[x1,y1],[x2,y2],[x3,y3],[x4,y4]] (0..1000 归一化坐标)",
     }
     res = await vision.json_call(frame, prompt, schema, scene_id="roi_auto")
-    fallbacks = _heuristic_rois(w, h)
+    if not isinstance(res, dict) or res.get("uncertain") is not False:
+        raise RuntimeError("画面无法可靠识别，请手动标定")
     rois: dict[str, list[list[int]]] = {}
     for name in targets:
-        pts = _normalize_pts(res.get(name), w, h) if isinstance(res, dict) else None
+        pts = _normalize_pts(res.get(name), w, h)
         if pts is None:
-            pts = fallbacks.get(name, [
-                [int(w * 0.2), int(h * 0.2)],
-                [int(w * 0.8), int(h * 0.2)],
-                [int(w * 0.8), int(h * 0.8)],
-                [int(w * 0.2), int(h * 0.8)],
-            ])
-        if save:
-            _save_polygon(name, pts)
+            raise RuntimeError(f"无法识别 {name}，请手动标定")
         rois[name] = pts
+    if save:
+        raise RuntimeError("AI 结果必须人工检查，请使用控制台草稿或手动标定")
     return rois
 
 
@@ -199,11 +195,11 @@ def calibrate(name: str) -> int:
 
 def main() -> int:
     import asyncio
-    parser = argparse.ArgumentParser(description="鼠标画多边形或 AI 自动标定 ROI 写入 settings.yaml")
+    parser = argparse.ArgumentParser(description="鼠标画 ROI，或生成待复核的 AI 标定建议")
     parser.add_argument("name", nargs="?", default="",
                         help="ROI 名字（如 door_inside / door_outside / bed）；--auto 时可省略")
     parser.add_argument("--auto", action="store_true",
-                        help="使用视觉大模型自动标定 ROI（无需手动画点）")
+                        help="生成 AI 标定建议，不会保存")
     args = parser.parse_args()
     if args.auto:
         targets = (args.name,) if args.name else DEFAULT_TARGETS
@@ -211,9 +207,9 @@ def main() -> int:
             if not re.fullmatch(r"[a-z][a-z0-9_]*", t):
                 print(f"名字必须是小写字母/数字/下划线：{t}")
                 return 1
-        rois = asyncio.run(auto_calibrate_rois(targets=targets, save=True))
+        rois = asyncio.run(auto_calibrate_rois(targets=targets, save=False))
         for k, v in rois.items():
-            print(f"已自动标定并写入 settings.yaml roi.{k} = {v}")
+            print(f"仅供检查，尚未保存 roi.{k} = {v}")
         return 0
     if not re.fullmatch(r"[a-z][a-z0-9_]*", args.name):
         print("名字必须是小写字母/数字/下划线（如 door_inside），或使用 --auto 自动标定")

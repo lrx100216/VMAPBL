@@ -150,6 +150,13 @@ class OccupancyTracker:
             return False
         return now - self._last_person_ts <= self.hold_s
 
+    def occupied_during(self, start_ts: float, end_ts: float) -> bool:
+        """在时间区间 [start_ts, end_ts] 内画面中是否有确认过的人形驻留。"""
+        if self._last_person_ts is None:
+            return False
+        return (start_ts - self.hold_s) <= self._last_person_ts <= (end_ts + self.hold_s)
+
+
 
 class MotionHistory:
     """前景占比短时历史：静止边沿时回查「静止前一瞬有没有运动突变」。

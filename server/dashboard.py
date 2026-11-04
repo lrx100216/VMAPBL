@@ -43,15 +43,25 @@ def _safe_detail(detail: dict) -> dict:
     return safe
 
 
-def _wake_info(log) -> tuple[float | None, str | None]:
+def _today_start_ts(now: float | None = None) -> float:
+    from datetime import datetime
+    dt = datetime.fromtimestamp(time.time() if now is None else float(now))
+    return dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def _wake_info(log, now: float | None = None) -> tuple[float | None, str | None]:
     if log is None:
         return None, None
+    midnight = _today_start_ts(now)
     for event in log.recent(scene_id="wake_up", limit=50):
+        ts = float(event.get("ts", 0))
+        if ts < midnight:
+            continue  # 忽略跨天历史事件，防止昨日起床时间泄漏进今日看板
         detail = event.get("detail") or {}
         result = detail.get("result")
         if event.get("kind") == "action_result" and isinstance(result, dict):
             if result.get("phase") == "first" and result.get("verdict") == "out_of_bed":
-                return float(event["ts"]), "events:wake_up/out_of_bed"
+                return ts, "events:wake_up/out_of_bed"
     return None, None
 
 
@@ -134,7 +144,7 @@ def dashboard_summary(*, state, log, camera=None, pose=None,
     else:
         presence = {"code": "unknown", "label": "状态未确认"}
 
-    wake_time, wake_source = _wake_info(log)
+    wake_time, wake_source = _wake_info(log, now=ts)
     recent_urgent = 0
     if log is not None:
         recent_urgent = sum(

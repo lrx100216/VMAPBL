@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -29,7 +30,9 @@ def evaluate(heartbeat: dict | None, *, now: float,
     if heartbeat is None:
         return ["heartbeat_missing_or_corrupt"]
     ts = heartbeat.get("ts")
-    if not isinstance(ts, (int, float)) or now - ts > stale_after_s:
+    if (not isinstance(ts, (int, float)) or isinstance(ts, bool)
+            or not math.isfinite(ts) or ts > now + 30
+            or now - ts > stale_after_s):
         return ["heartbeat_stale"]
     reasons = []
     if heartbeat.get("ready") is not True:

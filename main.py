@@ -112,8 +112,9 @@ async def _heartbeat_loop(log: EventLog, voice_task=None,
             today = time.strftime("%Y-%m-%d")
             if log is not None and today != last_maintenance_day:
                 keep_days = int(ops.get("history_keep_days", 30))
-                log.prune_history(keep_days=keep_days)
-                log.backup_to(config.ROOT / "data" / "backup" / "butler-latest.db")
+                await asyncio.to_thread(log.prune_history, keep_days=keep_days)
+                backup_path = config.ROOT / "data" / "backup" / "butler-latest.db"
+                await asyncio.to_thread(log.backup_to, backup_path)
                 last_maintenance_day = today
             ready, snap = readiness(camera=get_current(), log=log,
                                 pose=get_current_pose())
@@ -131,12 +132,13 @@ async def _heartbeat_loop(log: EventLog, voice_task=None,
 
 
 def _wire_vla(engine: SceneEngine) -> None:
-    """VLA 模式接线：定时、语音与家人事件。
+    """VLA 模式接线：定时、状态、语音与家人事件。
 
     `sensor.*` 不接场景——这些事件由 VLA 自己消费，再接场景会让同一次跌倒
-    双重确认、双重告警。
+    双重确认、双重告警。状态事件（如 occupancy on）仍接入场景引擎，以驱动出门钥匙提醒等状态场景。
     """
     engine.wire_time_triggers()
+    engine.wire_state_triggers()
     engine.wire_speech_triggers()
     engine.wire_event_triggers(skip_prefixes=("sensor.",))
 

@@ -88,6 +88,25 @@ def _distress_in_reply(reply: str, distress: list[str]) -> bool:
     return False
 
 
+def _fine_in_reply(reply: str, fine: list[str]) -> bool:
+    """reply 里是否存在「未被否定词前缀修饰」的平安/没事词。
+
+    对称防御：若老人回复「不是没事」「我可不没事」「一点也不好」，
+    虽然包含「没事」或「好」，但前面有否定词前缀修饰，不得误判为平安撤警。
+    """
+    for kw in fine:
+        start = 0
+        while True:
+            i = reply.find(kw, start)
+            if i < 0:
+                break
+            prefix = reply[max(0, i - 2):i]
+            if not any(neg in prefix for neg in ("没", "不", "非", "未", "别")):
+                return True
+            start = i + len(kw)
+    return False
+
+
 @skill("fall_confirm")
 async def fall_confirm(ctx: dict) -> str:
     """二次确认：语音询问 → 关键词分级。返回 'cancelled' / 'alerted'。
@@ -109,7 +128,7 @@ async def fall_confirm(ctx: dict) -> str:
     fine = cfg.get("fine_keywords", ["没事", "没摔", "还好", "自己起来"])
     distress = cfg.get("distress_keywords",
                        ["救命", "疼", "摔", "起不来", "动不了"])
-    if reply and any(k in reply for k in fine) \
+    if reply and _fine_in_reply(reply, fine) \
             and not _distress_in_reply(reply, distress):
         await tts.speak("好的，那您慢一点，注意安全。")
         return "cancelled"

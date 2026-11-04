@@ -34,3 +34,4 @@ from . import wakeup  # noqa: E402, F401
 from . import getup  # noqa: E402, F401
 from . import fall  # noqa: E402, F401
 from . import medication  # noqa: E402, F401
+from . import appliance  # noqa: E402, F401

@@ -333,9 +333,15 @@ async def test_api_roi_crud_and_auto(tmp_path, monkeypatch):
             # AI 自动标定（0..1000 归一化坐标自动映射到 640x480 像素坐标）
             r_auto = await c.post("/api/roi_auto", json={})
             assert r_auto.status_code == 200
-            auto_roi = r_auto.json()["roi"]
+            auto_roi = r_auto.json()["calibrated"]
             assert {"door_inside", "door_outside", "bed"} <= set(auto_roi.keys())
             assert auto_roi["bed"][0] == [320, 144]  # 500/1000*640=320, 300/1000*480=144
+            assert r_auto.json()["roi"] == {}
+            async def uncertain(*args, **kwargs):
+                return {"uncertain": True}
+            monkeypatch.setattr(vision, "json_call", uncertain)
+            assert (await c.post("/api/roi_auto", json={})).status_code == 400
+            assert (await c.get("/api/roi")).json()["roi"] == {}
             assert "# 注释保留测试" in fake_settings.read_text(encoding="utf-8")
     finally:
         monkeypatch.undo()

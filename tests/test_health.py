@@ -18,7 +18,10 @@ from server.app import create_app
 
 
 @pytest.fixture(autouse=True)
-def _clean_bus():
+def _clean_bus(monkeypatch):
+    monkeypatch.setenv("DINGTALK_WEBHOOK", "https://oapi.dingtalk.com/robot/send")
+    monkeypatch.setenv("FEISHU_WEBHOOK", "")
+    monkeypatch.setenv("NOTIFY_WEBHOOK_URL", "")
     yield
     bus.clear_subscriptions()
 

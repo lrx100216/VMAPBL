@@ -39,10 +39,16 @@ async def family_message_send(ctx: dict) -> dict:
         return {"status": "empty"}
     if not recipient:
         return {"status": "no_recipient"}
-    await notify.send(body, direction="to_family", sender="老人",
-                      recipient=recipient)
-    return {"status": "sent", "recipient": recipient,
-            "speech": f"好的，已经发给{recipient}了。"}
+    receipt = await notify.send_with_receipt(
+        body, direction="to_family", sender="老人", recipient=recipient)
+    if receipt.delivered:
+        return {"status": "sent", "recipient": recipient,
+                "speech": f"好的，已经发给{recipient}了。"}
+    if receipt.pending:
+        return {"status": "pending", "recipient": recipient,
+                "speech": f"给{recipient}的消息已保存，网络恢复后会自动重试。"}
+    return {"status": "undelivered", "recipient": recipient,
+            "speech": "消息暂时没能发出，也没有保存成功，请稍后再试。"}
 
 
 @skill("family_message_receive")
@@ -67,6 +73,10 @@ async def family_message_receive(ctx: dict) -> dict:
     # 短回复且含拒绝词 → 视为不回复；其他一切非空回复都原样回发
     if not reply or (len(reply) <= 6 and any(k in reply for k in refusal)):
         return {"status": "no_reply", "speech": "好的，不回复。"}
-    await notify.send(reply, direction="to_family", sender="老人",
-                      recipient="家人")
-    return {"status": "replied", "speech": f"好的，已回复家人：{reply}"}
+    receipt = await notify.send_with_receipt(
+        reply, direction="to_family", sender="老人", recipient="家人")
+    if receipt.delivered:
+        return {"status": "replied", "speech": f"好的，已回复家人：{reply}"}
+    if receipt.pending:
+        return {"status": "pending", "speech": "回复已保存，网络恢复后会自动重试。"}
+    return {"status": "undelivered", "speech": "回复暂时没能发出，也没有保存成功，请稍后再试。"}

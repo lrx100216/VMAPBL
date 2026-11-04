@@ -75,6 +75,7 @@ family_query:
 
 # M5 场景 3/5/6（几何/骨架判据，阈值都在这里调）
 door:
+  mode: proximity            # 仅监测门内区域，不判断外出或回家方向
   window_s: 4.0              # 场景3：落点投票用的姿态历史窗口（秒）
 wakeup:
   overlap_ratio: 0.5         # 场景5：人体框面积落入床区 ROI ≥ 此比例 → 判在床上
@@ -114,6 +115,8 @@ medication:
   remind_text: "奶奶，该吃{slot}的药了。"   # 播报文案，{slot} 换成时段名
   slot_labels: {morning: 早上, noon: 中午, evening: 晚上}
   taken_keywords: [吃了, 吃过, 吃好了]   # 降级路径回复命中 → 记已服药
+  use_vla: true               # 启用 VLA 多模态动作理解作为服药视觉判定（无需单独训练 pillbox.pt 权重）
+  vla_conf_threshold: 0.7     # VLA 判定服药动作置信度阈值
 pillbox:
   weights: models/pillbox.pt  # 自训药盒检测器（tools/train_pillbox.py 产出）；不存在则走降级语音
   conf: 0.5                   # 药盒框置信度阈值
@@ -162,29 +165,37 @@ ops:
   watchdog_state_path: data/watchdog_last_alert.json
   watchdog_repeat_s: 1800          # 同一异常重复告警的最小间隔
 
-roi:     # M4 标定工具写入：door_inside / door_outside / bed 等多边形顶点坐标
+roi:     # 需按实际摄像头画面标定 door_inside / door_outside / bed
   bed:
-  - - 0
-    - 260
-  - - 185
-    - 260
-  - - 230
-    - 265
-  - - 430
-    - 240
-  - - 500
-    - 270
-  - - 520
-    - 359
-  - - 0
-    - 359
+  - - 47
+    - 215
+  - - 224
+    - 166
+  - - 437
+    - 169
+  - - 630
+    - 190
+  - - 632
+    - 352
+  - - 49
+    - 352
   door_inside:
-  - - 205
-    - 270
-  - - 295
-    - 270
-  - - 330
-    - 340
-  - - 175
-    - 340
+  - - 414
+    - 83
+  - - 592
+    - 83
+  - - 608
+    - 198
+  - - 414
+    - 198
+homeassistant:
+  enabled: false                      # 局域网 Home Assistant 联动开关
+  base_url: "http://127.0.0.1:8123"  # HA 访问地址（例如 http://192.168.0.105:8123）
+  token: ""                          # 长期访问令牌（亦可通过环境变量 HA_TOKEN 配置）
+  timeout_s: 5.0                     # REST 请求超时秒数
+  entities:
+    night_light: "light.night_light" # 夜间起身自动点亮的柔光小夜灯
+    bed_sensor: "binary_sensor.bed_occupancy"
+    door_sensor: "binary_sensor.door_contact"
+    ac_climate: "climate.air_conditioner"
 disabled_scenes: []

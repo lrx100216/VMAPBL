@@ -1,0 +1,14 @@
+# 单侧画面：只提示靠近门，不能判断是否出门或回家。
+id: door_proximity
+name: 靠近门口提醒带钥匙
+trigger:
+  - type: event
+    event: door.approach
+condition:
+  - type: cooldown
+    seconds: 60
+action:
+  - type: speak
+    text: "您靠近门口了，如果要出门，请记得带钥匙。"
+mode: single
+priority: 0

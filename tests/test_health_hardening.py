@@ -156,6 +156,49 @@ async def test_stale_camera_marks_perception_degraded(monkeypatch):
     assert sent and sent[0][1] is True
 
 
+class _NeverFrameCamera:
+    source_is_file = False
+    source_is_stream = True
+    fps = 20
+    started = True
+    eof = False
+
+    def start(self):
+        pass
+
+    def latest(self):
+        return None
+
+    def ring(self, seconds=None):
+        return []
+
+    def stop(self):
+        pass
+
+
+async def test_never_received_first_frame_actively_marks_degraded(monkeypatch):
+    from test_m4_perception import _FakePose
+
+    monkeypatch.setattr("sensors.perception.config.settings", lambda: {
+        "camera": {"stale_s": 0}, "fall": {}, "pose": {}})
+    sent = []
+
+    async def fake_send(msg, urgent=False, **kwargs):
+        sent.append((msg, urgent))
+        return 1
+
+    monkeypatch.setattr(notify, "send", fake_send)
+    store = StateStore()
+    await run_perception(
+        camera=_NeverFrameCamera(),
+        gate=MotionGate(0.15, 0.05, proc_width=64, morph_kernel=1),
+        pose=_FakePose(), occ=OccupancyTracker(3.0),
+        still=StillDetector(60.0), st=store,
+        echo=False, max_frames=0)
+    assert store.perception_degraded is True
+    assert sent and sent[0][1] is True
+
+
 class _StaleAPICamera:
     started = True
 

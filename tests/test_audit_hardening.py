@@ -16,7 +16,14 @@ import pytest
 from core import bus, config
 from core.log import EventLog
 from core.state import StateStore, state
-from core.vla_agent import ActionType, VLAObservation, _distress_in_speech, decide_and_act
+from core.vla_agent import (
+    ActionType,
+    VLAObservation,
+    _distress_in_speech,
+    _fine_in_speech,
+    decide_and_act,
+)
+from actions.fall import _fine_in_reply
 from sensors import camera as cam_mod
 from sensors.sentinel import EdgeSentinel, run_sentinel
 from server.push import PushHub
@@ -43,6 +50,31 @@ def test_distress_in_speech_negation():
     assert _distress_in_speech("我摔了起不来", distress)
     assert _distress_in_speech("救命啊头晕", distress)
     assert _distress_in_speech("哎哟好疼", distress)
+
+
+def test_fine_in_speech_negation():
+    """验证平安词否定前缀防御：'不是没事'、'一点也不好' 不得被误判为平安。"""
+    fine = ["没事", "没摔", "还好", "自己起来", "不疼"]
+
+    # 包含否定前缀：绝不得识别为平安词
+    assert not _fine_in_speech("不是没事", fine)
+    assert not _fine_in_speech("我可不是没事", fine)
+    assert not _fine_in_speech("一点也不好", fine)
+    assert not _fine_in_speech("并不好", fine)
+    assert not _fine_in_speech("不是自己起来", fine)
+
+    # actions.fall._fine_in_reply 对称检验
+    assert not _fine_in_reply("不是没事", ["没事", "没摔", "还好", "自己起来"])
+    assert not _fine_in_reply("我可不是没事", ["没事", "没摔", "还好", "自己起来"])
+    assert not _fine_in_reply("一点也不好", ["没事", "没摔", "还好", "自己起来"])
+
+    # 真正平安表达：必须正确识别
+    assert _fine_in_speech("没事", fine)
+    assert _fine_in_speech("我没事，挺好的", fine)
+    assert _fine_in_speech("没摔着", fine)
+    assert _fine_in_speech("自己起来了", fine)
+    assert _fine_in_reply("没事", ["没事", "没摔", "还好", "自己起来"])
+    assert _fine_in_reply("没摔着，还好", ["没事", "没摔", "还好", "自己起来"])
 
 
 @pytest.mark.asyncio
@@ -80,7 +112,7 @@ async def test_vla_safety_inquiry_unresponsive_closure(tmp_path):
         if act_dict.get("type") == ActionType.SPEAK.value:
             return {"status": "success", "reply": ""}
         if act_dict.get("type") == ActionType.NOTIFY_FAMILY.value:
-            return {"status": "success", "delivered": True}
+            return {"status": "success", "delivered": True, "urgent": True}
         return {"status": "success"}
 
     with patch("core.vla_agent.dispatch_action", side_effect=mock_dispatch):
@@ -358,15 +390,20 @@ async def test_tts_spawn_say_cli_delimiter():
 async def test_messaging_format_injection():
     """验证老人说话含有大括号时不触发 Python 字符串格式化注入 (KeyError/ValueError)。"""
     from actions.messaging import family_message_send
+    from skills.notify import NotificationResult
 
     ctx = {"text": "儿子帮我买一盒{N95}口罩，还有2瓶{75%}酒精"}
 
-    with patch("actions.messaging.chat_json", new_callable=AsyncMock) as mock_chat:
+    with (patch("actions.messaging.chat_json", new_callable=AsyncMock) as mock_chat,
+          patch("actions.messaging.notify.send_with_receipt",
+                new_callable=AsyncMock) as mock_send):
         mock_chat.return_value = {
             "recipient": "儿子",
             "body": "买一盒N95口罩，还有2瓶75%酒精",
             "uncertain": False,
         }
+        mock_send.return_value = NotificationResult(
+            1, True, True, {"dingtalk": "delivered"})
         res = await family_message_send(ctx)
 
     assert res["status"] == "sent"
@@ -387,3 +424,62 @@ def test_state_reset_daily_medication():
 
     s.reset_daily_medication()
     assert s.medication_taken == {"morning": False, "noon": False, "evening": False}
+
+
+# ============================================================================
+# 7. TTS 防命令注入与紧急插话抢占（AUDIT-008 & AUDIT-018）
+# ============================================================================
+
+async def test_tts_strips_apple_speech_command_injection(monkeypatch):
+    """验证 TTS 播报时过滤 Apple Speech 命令 [[slnc ...]] 等注入标签。"""
+    from skills import tts
+    spoken_history = []
+
+    async def fake_runner(text):
+        spoken_history.append(text)
+
+    monkeypatch.setattr(tts, "_runner", fake_runner)
+    monkeypatch.setattr(tts, "_tts_settings", lambda: {"tail_silence_ms": 0})
+
+    await tts.speak("奶奶好[[slnc 60000]]今天天气不错[[volm 0.0]]")
+    assert spoken_history == ["奶奶好今天天气不错"]
+
+
+async def test_tts_urgent_speech_preempts_non_urgent_speech(monkeypatch):
+    """验证紧急播报（urgent=True）能够主动中断正在播放的非紧急长播报。"""
+    from skills import tts
+
+    order = []
+    task1_cancelled = asyncio.Event()
+
+    async def slow_runner(text):
+        order.append(f"start:{text}")
+        try:
+            await asyncio.sleep(10.0)
+            order.append(f"finish:{text}")
+        except asyncio.CancelledError:
+            order.append(f"cancelled:{text}")
+            task1_cancelled.set()
+            raise
+
+    async def fast_runner(text):
+        order.append(f"urgent:{text}")
+
+    monkeypatch.setattr(tts, "_tts_settings", lambda: {"tail_silence_ms": 0})
+
+    # 启动非紧急任务
+    monkeypatch.setattr(tts, "_runner", slow_runner)
+    task1 = asyncio.create_task(tts.speak("非紧急聊天回答", urgent=False))
+    await asyncio.sleep(0.05)
+    assert order == ["start:非紧急聊天回答"]
+
+    # 启动紧急任务
+    monkeypatch.setattr(tts, "_runner", fast_runner)
+    task2 = asyncio.create_task(tts.speak("奶奶您还好吗？", urgent=True))
+
+    await asyncio.wait_for(task1_cancelled.wait(), timeout=2.0)
+    await task2
+
+    assert "cancelled:非紧急聊天回答" in order
+    assert "urgent:奶奶您还好吗？" in order
+    assert tts.state.speaking is False

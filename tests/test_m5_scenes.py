@@ -453,6 +453,25 @@ def test_classify_getup_uncertain_cases():
 
 # ---------- 场景3：door_decision ----------
 
+async def test_single_sided_door_event_speaks_without_outside_roi(tmp_path, _spoken):
+    text = (ROOT / "scenes" / "door_proximity.yaml").read_text(encoding="utf-8")
+    engine = _engine_with(tmp_path, text, {})
+    engine.wire_event_triggers()
+    try:
+        await bus.publish({"type": "door.approach", "payload": {"source": "door_inside"}})
+        assert len(_spoken) == 1
+        assert "钥匙" in _spoken[0]
+        await bus.publish({"type": "door.approach", "payload": {"source": "door_inside"}})
+        assert len(_spoken) == 1
+    finally:
+        engine.unwire()
+
+
+async def test_proximity_mode_does_not_guess_direction(monkeypatch):
+    from actions import door
+    monkeypatch.setattr(config, "settings", lambda: {"door": {"mode": "proximity"}})
+    assert await door.door_decision({}) == "unknown"
+
 async def test_door_geo_out_and_in(fake_settings):
     from actions import door
     inside = make_hist([(i * 0.5, make_pose(bbox=(40, 50, 60, 90)))

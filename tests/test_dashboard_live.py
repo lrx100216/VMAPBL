@@ -130,3 +130,36 @@ async def test_dashboard_api_exposes_live_summary_and_timeline(tmp_path, monkeyp
     assert timeline.status_code == 200
     assert isinstance(timeline.json(), list)
     log.close()
+
+
+def test_wake_info_suppresses_yesterday_event(tmp_path):
+    """验证跨天数据泄露防护：昨日的起床事件不得作为今日起床时间展示。"""
+    store = StateStore()
+    log = EventLog(tmp_path / "cross_day.db")
+    now = time.time()
+    yesterday_ts = now - 86400  # 24小时前
+
+    # 模拟昨日写入一条起床成功事件
+    log._conn.execute(
+        "INSERT INTO events(ts, scene_id, kind, detail) VALUES (?,?,?,?)",
+        (yesterday_ts, "wake_up", "action_result",
+         '{"phase": "first", "result": {"phase": "first", "verdict": "out_of_bed"}}'))
+    log._conn.commit()
+
+    # 今日看板汇总：wake_time 必须为 None，不得泄露昨日时间
+    summary = dashboard_summary(state=store, log=log, camera=_HealthyCamera(),
+                                pose=_HealthyPose(), now=now)
+    assert summary["safety"]["wake_time"] is None
+
+    # 若今天有起床事件，必须正常呈现
+    today_ts = now - 300
+    log._conn.execute(
+        "INSERT INTO events(ts, scene_id, kind, detail) VALUES (?,?,?,?)",
+        (today_ts, "wake_up", "action_result",
+         '{"phase": "first", "result": {"phase": "first", "verdict": "out_of_bed"}}'))
+    log._conn.commit()
+
+    summary_today = dashboard_summary(state=store, log=log, camera=_HealthyCamera(),
+                                      pose=_HealthyPose(), now=now)
+    assert summary_today["safety"]["wake_time"] == today_ts
+    log.close()

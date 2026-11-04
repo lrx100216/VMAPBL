@@ -36,6 +36,8 @@ ruamel.yaml>=0.18          # ROI 标定工具写回 settings.yaml 时保留人�
 fastapi>=0.115
 uvicorn[standard]>=0.30
 websockets>=13
+dingtalk-stream==0.24.3    # 钉钉 Stream 长连接
+python-socks[asyncio]>=3.2 # WebSocket 通过 SOCKS 代理连接
 
 # ----- 场景8：Apple Vision OCR（仅 macOS，PyObjC）-----
 pyobjc-framework-Vision>=10.0   # 调用链：VNRecognizeTextRequest + VNImageRequestHandler

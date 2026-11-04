@@ -9,6 +9,44 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _block_real_microphone(monkeypatch):
+    """Tests may inject a fake microphone; they must not open the Mac's input."""
+    from skills import stt
+
+    async def blocked(self):
+        raise RuntimeError("测试不访问真实麦克风")
+
+    monkeypatch.setattr(stt.Microphone, "__aenter__", blocked)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settings_and_real_endpoints(tmp_path, monkeypatch):
+    """Each test owns its settings; live webhook credentials never leak into tests."""
+    import yaml
+    from core import config
+    original = config._SETTINGS_PATH
+    data = yaml.safe_load(original.read_text(encoding="utf-8")) if original.exists() else {}
+    data = data or {}
+    for name in ("dingtalk_webhook", "feishu_webhook", "webhook_url"):
+        (data.setdefault("notify", {}))[name] = ""
+    (data.setdefault("ops", {}))["watchdog_webhook_url"] = ""
+    (data.setdefault("homeassistant", {}))["token"] = ""
+    data["homeassistant"]["enabled"] = False
+    path = tmp_path / "isolated-settings.yaml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    monkeypatch.setattr(config, "_SETTINGS_PATH", path)
+    for key in ("DINGTALK_WEBHOOK", "FEISHU_WEBHOOK", "NOTIFY_WEBHOOK_URL",
+                "DINGTALK_SIGN_SECRET", "FEISHU_SIGN_SECRET", "HA_TOKEN",
+                "WATCHDOG_WEBHOOK_URL", "DINGTALK_DIRECT_ENABLED", "DINGTALK_USER_ID",
+                "DINGTALK_ROBOT_CODE"):
+        monkeypatch.delenv(key, raising=False)
+    cached_settings = config.settings
+    cached_settings.cache_clear()
+    yield
+    cached_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _spoken(monkeypatch):
     """自动生效：替换 tts 的进程执行器为记录器，尾静默压到 1ms。"""
     from skills import tts

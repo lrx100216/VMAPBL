@@ -18,6 +18,7 @@ from core import bus
 from core.log import default as default_log
 
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
+_IN_FLIGHT_MSG_IDS: set[int] = set()
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,14 @@ def get_webhook_urls() -> dict[str, str]:
         "feishu": feishu,
         "generic": generic,
     }
+
+
+def configured_channel_names() -> list[str]:
+    from skills.dingtalk_direct import configured
+    names = [name for name, url in get_webhook_urls().items() if url]
+    if configured():
+        names.append("dingtalk_direct")
+    return names
 
 
 def _is_zero_code(value: Any) -> bool:
@@ -162,8 +171,10 @@ async def dispatch_external(formatted_msg: str, *, urgent: bool,
                             recipient: str = "家人", msg_id: int | None = None) -> NotificationResult:
     """并发派发已配置渠道，并返回平台确认后的结构化结果。"""
     from core import config
+    from skills import dingtalk_direct
     urls = get_webhook_urls()
-    if direction != "to_family" or not any(urls.values()):
+    direct_cfg = dingtalk_direct.configured()
+    if direction != "to_family" or not (any(urls.values()) or direct_cfg):
         return NotificationResult(msg_id=msg_id, attempted=False,
                                   delivered=False, channels={})
 
@@ -172,6 +183,8 @@ async def dispatch_external(formatted_msg: str, *, urgent: bool,
     try:
         timeout = float((config.settings().get("notify") or {}).get("timeout_s", 2.5))
         async with httpx.AsyncClient(timeout=timeout) as client:
+            if direct_cfg:
+                jobs.append(("dingtalk_direct", dingtalk_direct.send(client, direct_cfg, formatted_msg)))
             if urls["dingtalk"]:
                 jobs.append(("dingtalk", _send_one_webhook(client, "dingtalk", "钉钉", urls["dingtalk"], {
                     "msgtype": "text",
@@ -217,11 +230,12 @@ async def dispatch_external(formatted_msg: str, *, urgent: bool,
             channels=channels,
             retry_after_s=max((hint.get("after_s", 0.0)
                                for hint in retry_hints.values()), default=0.0),
-            permanent=any(hint.get("permanent", False)
-                          for hint in retry_hints.values()),
+            permanent=(bool(channels) and all(
+                retry_hints.get(name, {}).get("permanent", False)
+                for name in channels)),
         )
         _record_delivery_result(result, attempts=attempts)
-        if result.delivered and urgent and msg_id is not None:
+        if result.delivered and msg_id is not None:
             log = default_log()
             if log is not None:
                 try:
@@ -231,7 +245,7 @@ async def dispatch_external(formatted_msg: str, *, urgent: bool,
         return result
     except Exception as e:
         print(f"[notify] 外部推送客户端异常（{type(e).__name__}）")
-        channels = {name: "failed" for name, url in urls.items() if url}
+        channels = {name: "failed" for name in configured_channel_names()}
         result = NotificationResult(
             msg_id=msg_id,
             attempted=bool(jobs),  # 客户端都建不起来时一个请求都没发
@@ -251,15 +265,25 @@ async def _dispatch_with_deadline(formatted_msg: str, **kwargs) -> NotificationR
         return await asyncio.wait_for(
             dispatch_external(formatted_msg, **kwargs), timeout=deadline)
     except asyncio.TimeoutError:
-        urls = get_webhook_urls()
+        names = configured_channel_names()
         result = NotificationResult(
             msg_id=kwargs.get("msg_id"),
-            attempted=any(urls.values()),
+            attempted=bool(names),
             delivered=False,
-            channels={name: "timeout" for name, url in urls.items() if url},
+            channels={name: "timeout" for name in names},
         )
         _record_delivery_result(result, error_type="TimeoutError")
         return result
+
+
+async def _dispatch_claimed(formatted_msg: str, **kwargs) -> NotificationResult:
+    """执行已登记 msg_id 的派发，并保证取消/异常后释放在途标记。"""
+    try:
+        return await _dispatch_with_deadline(formatted_msg, **kwargs)
+    finally:
+        msg_id = kwargs.get("msg_id")
+        if msg_id is not None:
+            _IN_FLIGHT_MSG_IDS.discard(msg_id)
 
 
 async def wait_pending() -> None:
@@ -283,9 +307,9 @@ async def send(msg: str, urgent: bool = False, *,
             msg_id = log.save_message(direction, msg, sender, recipient, urgent)
     except Exception as e:
         print(f"[notify] 落库失败（{type(e).__name__}: {e}）")
-    # 紧急通知先于任何外发/广播等待持久化，取消或崩溃也保留补发资格
+    # 所有家人外发先于网络等待持久化；取消、崩溃或未配置渠道都保留补发资格
     formatted_msg = _format_external_message(msg, urgent)
-    if urgent and direction == "to_family" and msg_id is not None:
+    if direction == "to_family" and msg_id is not None:
         from core import config
         outbox_log = default_log()
         if outbox_log is not None:
@@ -293,11 +317,11 @@ async def send(msg: str, urgent: bool = False, *,
                 cfg = config.settings().get("notify") or {}
                 delay = max(0.0, float(cfg.get("retry_backoff_s", 0.5)))
                 outbox_log.enqueue_notification(
-                    msg_id, formatted_msg, urgent=True, sender=sender,
+                    msg_id, formatted_msg, urgent=urgent, sender=sender,
                     recipient=recipient, direction=direction,
                     next_attempt_ts=time.time() + delay, error="pending")
             except Exception as e:
-                print(f"[notify] 紧急通知预入队失败（{type(e).__name__}）")
+                print(f"[notify] 通知预入队失败（{type(e).__name__}）")
     try:
         await bus.publish({"type": "notify.family", "payload": {
             "id": msg_id, "msg": msg, "urgent": urgent, "direction": direction}})
@@ -308,9 +332,11 @@ async def send(msg: str, urgent: bool = False, *,
 
     # 外部渠道推送（仅向家人方向的消息推送）
     if direction == "to_family" and _dispatch:
+        if msg_id is not None:
+            _IN_FLIGHT_MSG_IDS.add(msg_id)
         try:
             task = asyncio.create_task(
-                _dispatch_with_deadline(
+                _dispatch_claimed(
                     formatted_msg,
                     urgent=urgent,
                     direction=direction,
@@ -324,6 +350,8 @@ async def send(msg: str, urgent: bool = False, *,
             if wait_dispatch:
                 await task
         except Exception as e:
+            if msg_id is not None:
+                _IN_FLIGHT_MSG_IDS.discard(msg_id)
             print(f"[notify] 创建外部推送后台任务失败（{type(e).__name__}: {e}）")
 
     return msg_id
@@ -341,13 +369,15 @@ async def send_with_receipt(msg: str, urgent: bool = False, *,
         return NotificationResult(msg_id=msg_id, attempted=False,
                                   delivered=False, channels={})
     formatted_msg = _format_external_message(msg, urgent)
-    result = await _dispatch_with_deadline(
+    if msg_id is not None:
+        _IN_FLIGHT_MSG_IDS.add(msg_id)
+    result = await _dispatch_claimed(
         formatted_msg, urgent=urgent, direction=direction,
         sender=sender, recipient=recipient, msg_id=msg_id)
     if not result.delivered and not result.attempted:
         # 无渠道或客户端未建立：安全场景同样要留下“未外部送达”的审计记录。
         _record_delivery_result(result)
-    if urgent and not result.delivered and msg_id is not None:
+    if not result.delivered and msg_id is not None:
         # send() 已在外发前预入队；这里只反映真实 pending 状态，不重复插入
         log = default_log()
         if log is not None and log.has_pending_notification(msg_id):
@@ -380,13 +410,16 @@ async def notification_retry_loop(log, *, stop_event: asyncio.Event | None = Non
                 async with semaphore:
                     if stopped():
                         return
-                    result = await _dispatch_with_deadline(
+                    msg_id = row["msg_id"]
+                    if msg_id is not None and msg_id in _IN_FLIGHT_MSG_IDS:
+                        return  # 首次派发仍在等待回执，本轮保留 pending，下轮再看
+                    if msg_id is not None:
+                        _IN_FLIGHT_MSG_IDS.add(msg_id)
+                    result = await _dispatch_claimed(
                         row["text"], urgent=bool(row["urgent"]),
                         direction=row["direction"], sender=row["sender"],
-                        recipient=row["recipient"], msg_id=row["msg_id"])
+                        recipient=row["recipient"], msg_id=msg_id)
                     if not result.delivered:
-                        permanent = result.permanent or any(
-                            v == "failed_permanent" for v in result.channels.values())
                         attempt_no = int(row["attempts"]) + 1
                         delay = min(60.0, base_backoff * (2 ** min(attempt_no, 6)))
                         max_after = float(cfg.get("max_retry_after_s", 10.0))
@@ -394,8 +427,8 @@ async def notification_retry_loop(log, *, stop_event: asyncio.Event | None = Non
                         log.mark_notification_attempt(
                             row["id"], delivered=False,
                             next_attempt_ts=time.time() + delay,
-                            error="permanent_failure" if permanent else "undelivered",
-                            max_attempts=1 if permanent else max_total)
+                            error="permanent_failure" if result.permanent else "undelivered",
+                            max_attempts=1 if result.permanent else max_total)
                     # 成功时 dispatch_external 已按 msg_id 关闭 pending
 
             if rows:

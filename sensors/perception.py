@@ -28,6 +28,7 @@ from collections import deque
 
 from core import bus, config
 from core.state import StateStore, state as global_state
+from sensors.geometry import point_in_polygon
 from sensors.camera import Camera, set_current
 from sensors.motion import (MotionGate, MotionHistory, OccupancyTracker,
                             StillDetector)
@@ -37,6 +38,40 @@ log = logging.getLogger(__name__)
 
 # 与 pose 确认节流同节奏：0.5s 一次，128 条 ≈ 64 秒，覆盖场景6 的 getup.window_s
 _MAX_POSE_HISTORY = 128
+
+
+class DoorProximityTracker:
+    """Debounce door-zone entry and rearm only after consecutive misses."""
+
+    def __init__(self, enter_samples: int = 2, exit_samples: int = 4):
+        self.enter_samples = max(1, enter_samples)
+        self.exit_samples = max(1, exit_samples)
+        self.inside = False
+        self.hits = 0
+        self.misses = 0
+        self.region = None
+
+    def update(self, persons: list, region: list | None) -> bool:
+        key = tuple(tuple(p) for p in region) if region else ()
+        if key != self.region:
+            self.region = key
+            self.inside = False
+            self.hits = self.misses = 0
+        if len(key) < 3:
+            return False
+        present = any(point_in_polygon(*person.bottom_midpoint(), region) for person in persons)
+        if present:
+            self.hits += 1
+            self.misses = 0
+            if not self.inside and self.hits >= self.enter_samples:
+                self.inside = True
+                return True
+        else:
+            self.hits = 0
+            self.misses += 1
+            if self.misses >= self.exit_samples:
+                self.inside = False
+        return False
 
 
 class PoseHistory:
@@ -108,7 +143,8 @@ async def run_perception(*, camera: Camera | None = None,
                          spike_ratio: float | None = None,
                          spike_window_s: float | None = None,
                          echo: bool = True,
-                         max_frames: int | None = None) -> dict:
+                         max_frames: int | None = None,
+                         max_duration_s: float | None = None) -> dict:
     """跑感知回路直到视频结束/被取消/max_frames。返回统计字典（测量用）。
 
     所有组件可注入假实现，便于离线测试；默认从 settings.yaml 构造。
@@ -137,6 +173,7 @@ async def run_perception(*, camera: Camera | None = None,
     await asyncio.get_running_loop().run_in_executor(None, cam.start)
     set_current_pose(pose)
     hist = PoseHistory()
+    door_tracker = DoorProximityTracker()
     register_current(hist)  # 场景动作经 pose_history() 取数（M5）
     if own_camera:
         set_current(cam)  # 让 skills/vision.grab_frame 复用同一视频源
@@ -146,10 +183,13 @@ async def run_perception(*, camera: Camera | None = None,
     # 初始化为 -inf：第一次闸门打开时立即跑姿态确认，而不是先空等一个
     # interval（帧时钟起点任意，例如文件回放的 ts 从 0 开始）
     last_pose_run = float("-inf")
+    first_frame_ts: float | None = None
+    last_pose_was_idle = False
     prev_motion = False
     frames = pose_calls = 0
     pose_ms_samples: list[float] = []
     t_start = time.monotonic()
+    started_wall = time.time()
 
     def _log_line(msg: str) -> None:
         if echo:
@@ -176,13 +216,16 @@ async def run_perception(*, camera: Camera | None = None,
 
     try:
         while True:
+            if max_duration_s is not None and time.monotonic() - t_start >= max_duration_s:
+                break
             latest = cam.latest()
             if latest is None or latest[0] == last_ts:
                 if cam.eof:  # 文件回放结束
                     break
-                # 实时摄像头/网络流无新帧时必须显式降级；文件回放不用墙钟判 stale
-                if last_ts is not None and not getattr(cam, "source_is_file", True):
-                    age_s = time.time() - last_ts
+                # 实时源无新帧必须显式降级；从未收到首帧时以启动时间为起点
+                if not getattr(cam, "source_is_file", True):
+                    reference_ts = last_ts if last_ts is not None else started_wall
+                    age_s = time.time() - reference_ts
                     if age_s >= stale_s:
                         await _set_camera_degraded(True, age_s)
                 await asyncio.sleep(poll_s)
@@ -192,6 +235,8 @@ async def run_perception(*, camera: Camera | None = None,
             if st.perception_degraded:
                 await _set_camera_degraded(False, 0.0)
             ts, frame = latest
+            if first_frame_ts is None:
+                first_frame_ts = ts
             last_ts = ts
             frames += 1
 
@@ -202,6 +247,7 @@ async def run_perception(*, camera: Camera | None = None,
                 mhist.note(ts, ratio)  # 建模期占比是垃圾数据，不入账
             if motion_active:
                 st.last_motion_ts = ts  # 高频字段：直接写，不发事件（见模块docstring）
+            motion_started = motion_active and not prev_motion
             if motion_active != prev_motion:
                 bus.publish_nowait({"type": "sensor.motion", "ts": ts,
                                     "payload": {"active": motion_active,
@@ -210,10 +256,17 @@ async def run_perception(*, camera: Camera | None = None,
                           f"（前景占比 {ratio:.1%}）")
             prev_motion = motion_active
 
-            # 第二道闸门：有运动或画面有人时，节流跑姿态确认人形
-            if (motion_active or occ.occupied(ts)) and \
-                    ts - last_pose_run >= pose_interval_s:
+            # Even a motionless person may already be present at startup or after
+            # an occlusion. Recheck idle frames periodically instead of waiting
+            # forever for motion; model non-detection still does not prove absence.
+            idle_interval_s = max(pose_interval_s, 5.0)
+            active = motion_active or occ.occupied(ts)
+            idle_reference = first_frame_ts if last_pose_run == float("-inf") else last_pose_run
+            due = (ts - last_pose_run >= pose_interval_s if active else
+                   ts - idle_reference >= idle_interval_s)
+            if not gate.warming_up and (due or (motion_started and last_pose_was_idle)):
                 last_pose_run = ts
+                last_pose_was_idle = not motion_active and not occ.occupied(ts)
                 t0 = time.monotonic()
                 try:
                     persons = await loop.run_in_executor(
@@ -226,6 +279,12 @@ async def run_perception(*, camera: Camera | None = None,
                     pose_calls += 1
                     pose_ms_samples.append(pose_ms)
                     occ.note_person(ts, len(persons) > 0)
+                    current_settings = config.settings()
+                    if (current_settings.get("door") or {}).get("mode") == "proximity":
+                        region = (current_settings.get("roi") or {}).get("door_inside")
+                        if door_tracker.update(persons, region):
+                            bus.publish_nowait({"type": "door.approach", "ts": ts,
+                                                "payload": {"source": "door_inside"}})
                     if persons:
                         person = primary_person(persons)
                         hist.append(ts, person, frame.shape)
@@ -257,7 +316,11 @@ async def run_perception(*, camera: Camera | None = None,
                 _log_line(f"持续静止 {still.still_seconds:.0f}s → is_still=True"
                           f"（静止前峰值 {spike:.1%}，已发 sensor.still）")
                 occupancy_at_quiet = (
-                    quiet_since is not None and occ.occupied(quiet_since))
+                    quiet_since is not None and (
+                        occ.occupied(quiet_since)
+                        or occ.occupied_during(quiet_since - spike_window_s, quiet_since)
+                    )
+                )
                 if spike >= spike_ratio and occupancy_at_quiet:
                     bus.publish_nowait({"type": "sensor.sudden_still", "ts": ts,
                                         "payload": {"after_s": still.still_seconds,

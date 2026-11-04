@@ -45,9 +45,19 @@ def _geo_decide(samples: list, inside: list, outside: list) -> str | None:
 async def door_decision(ctx: dict) -> str:
     """返回 'out'（出门）/ 'in'（回家）/ 'unknown'，写 ctx["result"] 供 choose。"""
     cfg = config.settings()
+    if (cfg.get("door") or {}).get("mode") == "proximity":
+        return "unknown"  # Single-sided reminders use the dedicated entry event.
     rois = cfg.get("roi") or {}
     inside, outside = rois.get("door_inside"), rois.get("door_outside")
     if not inside or not outside:
+        missing = []
+        if not inside:
+            missing.append("door_inside")
+        if not outside:
+            missing.append("door_outside")
+        import logging
+        logging.getLogger("actions.door").warning(
+            "缺 ROI %s：标定工具写入前场景只落库不播报", " / ".join(missing))
         return "unknown"  # 缺 ROI 不猜：标定工具写入前场景只落库不播报
 
     hist = perception.pose_history()

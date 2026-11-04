@@ -378,19 +378,20 @@ def test_wrist_near_box_dilation():
 
 
 async def test_medication_visual_taken(med_settings, _spoken, monkeypatch):
-    """两阶段全过：药盒在场 4/5 → 手腕近盒 5/5 → 记服药 + 语音回执，不通知家人。"""
+    """视觉检测后仍须语音确认，未确认不得记为已服药。"""
     from actions import medication
+    from skills import stt
+    monkeypatch.setattr(stt, "listen", lambda *a, **kw: _reply("还没吃"))
     sent = await _notify_stub(monkeypatch)
     script = [[_BOX], [_BOX], [_BOX], [], [_BOX]] + [[_BOX]] * 5
     st = StateStore()
     _wire_medication(monkeypatch, _ScriptedDetector(script, tail=[_BOX]),
                      _ScriptedPose([_wrist_pose(150, 150)]), st)
     r = await medication.medication_watch({}, slot="morning")
-    assert r == "taken"
-    assert st.medication_taken["morning"] is True
+    assert r == "voice_pending"
+    assert st.medication_taken["morning"] is False
     assert any("该吃早上的药了" in s for s in _spoken)
-    assert any("已记下服药" in s for s in _spoken)
-    assert sent == []                            # 确认服药不打扰家人
+    assert sent and "未确认服药" in sent[0][0]
 
 
 async def test_medication_no_pillbox_times_out(med_settings, monkeypatch):
@@ -463,6 +464,8 @@ async def test_medication_scene_chain_via_engine(tmp_path, med_settings, _spoken
                                                  monkeypatch):
     """真实 YAML 链路：manual 触发 → template 条件放行 → 两阶段投票 → 记服药。"""
     from actions import SKILLS
+    from skills import stt
+    monkeypatch.setattr(stt, "listen", lambda *a, **kw: _reply("药吃过了"))
     sent = await _notify_stub(monkeypatch)
     yaml_text = (ROOT / "scenes" / "medication.yaml").read_text(encoding="utf-8")
     new_text = yaml_text.replace("""  - type: time_window

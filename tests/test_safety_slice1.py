@@ -207,6 +207,40 @@ async def test_tts_timeout_kills_process_and_restores_speaking(monkeypatch):
     assert state.speaking is False
 
 
+async def test_tts_cancellation_kills_process_and_restores_speaking(monkeypatch):
+    class SlowProcess:
+        def __init__(self):
+            self.killed = False
+            self.waiting = asyncio.Event()
+
+        async def wait(self):
+            self.waiting.set()
+            if self.killed:
+                return 0
+            await asyncio.sleep(60)
+            return 0
+
+        def kill(self):
+            self.killed = True
+
+    proc = SlowProcess()
+
+    async def fake_exec(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(tts, "_runner", tts._spawn_say)
+    monkeypatch.setattr(tts, "_tts_settings", lambda: {
+        "tail_silence_ms": 0, "voice": "Tingting", "timeout_s": 60})
+    task = asyncio.create_task(tts.speak("取消测试"))
+    await asyncio.wait_for(proc.waiting.wait(), timeout=1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert proc.killed is True
+    assert state.speaking is False
+
+
 async def test_tts_caps_overlong_text(monkeypatch):
     seen = []
 

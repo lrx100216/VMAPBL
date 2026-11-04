@@ -26,6 +26,18 @@ def test_dependency_requirements_and_lock_are_reproducible():
     assert not any(line.startswith("opencv-python==5") for line in lock.splitlines())
 
 
+def test_single_sided_door_does_not_require_outside_roi(tmp_path):
+    from core.preflight import production_issues
+    poly = [[0, 0], [5, 0], [5, 5]]
+    cfg = {"roi": {"bed": poly, "door_inside": poly}, "door": {"mode": "proximity"}}
+    issues = production_issues(settings=cfg, env={}, root=tmp_path)
+    assert not any("door_outside" in issue for issue in issues)
+    assert not any("door_inside" in issue for issue in issues)
+    cfg["roi"].pop("door_inside")
+    issues = production_issues(settings=cfg, env={}, root=tmp_path)
+    assert any("door_inside" in issue for issue in issues)
+
+
 def test_production_preflight_collects_all_blockers(tmp_path):
     from core.preflight import production_issues
 
@@ -62,12 +74,24 @@ def test_production_preflight_accepts_complete_config(tmp_path):
         "ops": {"log_path": "logs/butler.log"},
         "pose": {"weights": "models/pose.pt", "prefer_coreml": False},
         "notify": {"dingtalk_webhook": "https://example.invalid/hook"},
+        "roi": {name: [[0, 0], [1, 0], [1, 1]] for name in ("bed", "door_inside", "door_outside")},
     }
     env = {
         "BUTLER_TOKEN": "token",
         "DINGTALK_SIGN_SECRET": "secret",
     }
     assert production_issues(settings=settings, env=env, root=tmp_path) == []
+
+
+def test_production_preflight_rejects_missing_roi(tmp_path):
+    from core.preflight import production_issues
+    issues = production_issues(settings={"roi": {}}, env={}, root=tmp_path)
+    assert all(any(name in issue for issue in issues)
+               for name in ("bed", "door_inside", "door_outside"))
+    issues = production_issues(settings={"roi": {"bed": [1, 2, 3]}}, env={}, root=tmp_path)
+    assert any("bed" in issue for issue in issues)
+    issues = production_issues(settings={"roi": {"bed": [[0, 0], [1, 1], [2, 2]]}}, env={}, root=tmp_path)
+    assert any("bed" in issue for issue in issues)
 
 
 def test_production_preflight_checks_channel_specific_signatures(tmp_path):

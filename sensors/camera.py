@@ -175,8 +175,8 @@ class Camera:
                 if not self.source_is_stream or attempt >= max_attempts:
                     raise
                 self.reconnects += 1
-                log.warning("网络视频源第 %d 次启动失败，%s 秒后重试",
-                            attempt, retry_s)
+                log.warning("网络视频源第 %d 次启动失败（%s），%s 秒后重试",
+                            attempt, safe_source(self.source), retry_s)
                 if self._stop.wait(retry_s):
                     raise RuntimeError("视频源启动已取消")
         if cap is None or not cap.isOpened():
@@ -212,6 +212,7 @@ class Camera:
         # 实时源每 3 帧（10fps）编码一次 JPEG 进环形缓冲与前端缓存，省 67% CPU/内存；
         # 文件回放源每帧都编码，保证短素材离线回放帧数精确。
         encode_stride = 1 if self.source_is_file else 3
+        consecutive_failures = 0
         while not self._stop.is_set():
             if self._cap is None:      # 上次重连失败：后台继续尝试
                 self._reconnect()
@@ -223,11 +224,15 @@ class Camera:
                     self.eof = True
                     log.info("文件回放结束")
                     return
-                if self.source_is_stream:
+                consecutive_failures += 1
+                if self.source_is_stream or consecutive_failures >= 30:
+                    log.warning("视频源读帧连续失败 %d 次，触发重连", consecutive_failures)
+                    consecutive_failures = 0
                     self._reconnect()
                     continue
                 time.sleep(0.05)  # 实时源偶发丢帧：稍等重试
                 continue
+            consecutive_failures = 0
             ts = time.time()
             frame_idx += 1
             with self._lock:
@@ -278,12 +283,16 @@ class Camera:
         if self._stop.wait(max(0.0, delay)):
             return
         try:
-            self._cap = self._open_stream_capture()
+            cap = self._open_capture()
+            if not self.source_is_file and not self.source_is_stream:
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            self._cap = cap
             self.last_error = None
         except Exception as e:
             # 只记录异常类型，避免把带账号密码的 RTSP 地址写进日志
             self.last_error = type(e).__name__
-            log.warning("网络视频源重连失败（%s），稍后继续重试",
+            log.warning("视频源重连失败（%s），稍后继续重试",
                         type(e).__name__)
 
     def health(self, now: float | None = None,

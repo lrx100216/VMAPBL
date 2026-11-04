@@ -425,16 +425,20 @@ class EdgeSentinel:
     ) -> tuple[bool, float, list[str]]:
         """处理新帧或无新帧的计时 tick。
 
-        frame=None 表示实时源没有新图：不重复做图像差分，但仍推进静止与定时逻辑。
+        frame=None 表示实时源没有新图：不推进运动/静止证据链，只检查定时事件。
         """
         cur_ts = time.time() if ts is None else float(ts)
 
-        # 1. 有新图才做差分；冻结/无新图只推进安静状态
         if frame is None:
-            ratio = 0.0
-        else:
-            gray = self.preprocess_frame(frame)
-            ratio = self.compute_diff(gray)
+            # 断流时长不属于“画面中老人持续安静”；恢复后重新开始安静计时
+            self.quiet_since = None
+            events = self.check_time_triggers(cur_ts)
+            self._events_count += len(events)
+            return False, 0.0, events
+
+        # 1. 只有真实新图才做差分
+        gray = self.preprocess_frame(frame)
+        ratio = self.compute_diff(gray)
         is_motion = ratio > self.motion_threshold
 
         # 2. 记入运动历史（滑动窗口淘汰）
@@ -464,6 +468,8 @@ class EdgeSentinel:
 
             if self.update_state:
                 global_state.last_motion_ts = cur_ts
+                if not getattr(global_state, "occupancy", False):
+                    global_state.set("occupancy", True)
                 if getattr(global_state, "is_still", False):
                     global_state.set("is_still", False)
 
@@ -481,8 +487,12 @@ class EdgeSentinel:
             if self.quiet_since is None:
                 self.quiet_since = cur_ts
 
-            # sudden_still 检测：剧烈运动后紧接着持续静止
             quiet_duration = cur_ts - self.quiet_since
+            if self.update_state and quiet_duration >= 30.0:
+                if getattr(global_state, "occupancy", False):
+                    global_state.set("occupancy", False)
+
+            # sudden_still 检测：剧烈运动后紧接着持续静止
             if not self.sudden_still_fired and quiet_duration >= self.sustained_quiet_s:
                 # 回查静止起点前 spike_window_s 窗口内的峰值
                 t_spike_start = self.quiet_since - self.spike_window_s
@@ -645,8 +655,9 @@ async def run_sentinel(
 
     iteration = 0
     last_frame_ts: float | None = None
-    callback_queue: asyncio.Queue | None = None
+    callback_queue: asyncio.PriorityQueue | None = None
     callback_task: asyncio.Task | None = None
+    callback_sequence = 0
     dropped_events = 0
     queue_stop = object()
 
@@ -660,7 +671,7 @@ async def run_sentinel(
 
     async def _callback_worker() -> None:
         while True:
-            obs = await callback_queue.get()
+            _priority, _sequence, obs = await callback_queue.get()
             try:
                 if obs is queue_stop:
                     return
@@ -675,24 +686,39 @@ async def run_sentinel(
         from core import config
         queue_size = int((config.settings().get("sentinel") or {}).get(
             "callback_queue_size", 32))
-        callback_queue = asyncio.Queue(maxsize=max(1, queue_size))
+        callback_queue = asyncio.PriorityQueue(maxsize=max(1, queue_size))
         callback_task = asyncio.create_task(_callback_worker(), name="sentinel-callbacks")
 
     def _offer_callback(obs, *, high_priority: bool) -> None:
-        nonlocal dropped_events
+        nonlocal dropped_events, callback_sequence
         if callback_queue is None:
             return
+        item = (0 if high_priority else 1, callback_sequence, obs)
+        callback_sequence += 1
         if callback_queue.full():
             if not high_priority:
                 dropped_events += 1
                 log.warning("回调队列已满，合并丢弃普通事件 %s", obs.trigger_reason)
                 return
-            try:
-                callback_queue.get_nowait()  # 丢弃最旧一条，给高危事件让位
+            # 优先挤掉普通事件；只有队列全是高危时才丢弃最旧高危以保住新告警
+            held_high = []
+            dropped_ordinary = False
+            while not callback_queue.empty():
+                queued = callback_queue.get_nowait()
                 callback_queue.task_done()
-            except asyncio.QueueEmpty:
-                pass
-        callback_queue.put_nowait(obs)
+                if queued[0] != 0:
+                    dropped_ordinary = True
+                    dropped_events += 1
+                    log.warning("回调队列已满，丢弃普通事件为高危告警让位")
+                    break
+                held_high.append(queued)
+            if not dropped_ordinary and held_high:
+                held_high.pop(0)
+                dropped_events += 1
+                log.warning("回调队列全为高危事件，丢弃最旧一条以接收新告警")
+            for queued in held_high:
+                callback_queue.put_nowait(queued)
+        callback_queue.put_nowait(item)
 
     log.info("EdgeSentinel 启动: 目标帧率 %.1f fps (周期 %.0f ms)", sentinel.fps, interval * 1000)
 
@@ -741,7 +767,7 @@ async def run_sentinel(
                     ts = time.time()
 
             if raw_frame is not None or last_frame_ts is not None:
-                # 无新图时也推进安静计时；observation.frame 保持 None，不伪用旧图
+                # 无新图只推进定时事件；observation.frame 保持 None，不伪用旧图
                 t_proc_start = time.perf_counter()
                 is_motion, ratio, events = sentinel.process_frame(raw_frame, ts=ts)
                 proc_ms = (time.perf_counter() - t_proc_start) * 1000.0
@@ -777,7 +803,7 @@ async def run_sentinel(
                 await asyncio.gather(callback_task, return_exceptions=True)
             else:
                 try:
-                    callback_queue.put_nowait(queue_stop)
+                    await callback_queue.put((2, callback_sequence, queue_stop))
                     await callback_task
                 except (asyncio.CancelledError, Exception):
                     callback_task.cancel()

@@ -57,7 +57,7 @@ def _rss_kb() -> int:
         return 0
 
 
-async def _cycle(video: str | None, tmp: Path, idx: int) -> dict:
+async def _cycle(video: str | None, tmp: Path, idx: int, remaining_s: float) -> dict:
     """单轮：全新 StateStore/日志/感知回路跑一个视频（或实时直到被取消）。"""
     from core.log import EventLog
     from core.state import StateStore
@@ -70,7 +70,7 @@ async def _cycle(video: str | None, tmp: Path, idx: int) -> dict:
     if video is not None:
         os.environ["VIDEO_SOURCE"] = video
     try:
-        stats = await run_perception(st=st, echo=False)
+        stats = await run_perception(st=st, echo=False, max_duration_s=remaining_s)
     finally:
         if old_src is None:
             os.environ.pop("VIDEO_SOURCE", None)
@@ -94,6 +94,8 @@ def main() -> int:
 
     if args.video and not Path(args.video).exists():
         raise SystemExit(f"素材不存在：{args.video}")
+    if args.minutes <= 0:
+        raise SystemExit("运行时长必须大于零")
 
     # 姿态模型只加载一次（循环复用）
     import sensors.perception as perc
@@ -107,6 +109,8 @@ def main() -> int:
     rss_samples: list[int] = []
     err_samples: list[str] = []
     t_start = time.monotonic()
+    interrupted = False
+    frames_total = 0
 
     print(f"稳压测试开始：video={args.video or '摄像头'} "
           f"预算 {args.minutes:.0f} 分钟（Ctrl+C 提前结束）")
@@ -120,8 +124,9 @@ def main() -> int:
                 idx += 1
                 t0 = time.monotonic()
                 try:
-                    await_cycle = _cycle(args.video, tmp, idx)
+                    await_cycle = _cycle(args.video, tmp, idx, max(0.0, t_end - time.monotonic()))
                     info = asyncio.run(await_cycle)
+                    frames_total += info["frames"]
                     cycles += 1
                     dt = time.monotonic() - t0
                     cycle_times.append(dt)
@@ -139,6 +144,7 @@ def main() -> int:
                     err_samples.append(f"{type(e).__name__}: {e}")
                     print(f"  ✗ 轮 {idx} 异常：{type(e).__name__}: {e}", flush=True)
     except KeyboardInterrupt:
+        interrupted = True
         print("\n提前结束。")
     finally:
         perc.PoseEstimator = orig_cls
@@ -164,8 +170,10 @@ def main() -> int:
         print("异常样本：")
         for s in err_samples[:5]:
             print(f"  - {s}")
-    print("验收：异常 0 次 + RSS 漂移 <20MB + 每轮都完成 = 2 小时稳压通过")
-    return 0 if errors == 0 else 1
+    completed = elapsed >= args.minutes * 60 and not interrupted
+    print(f"累计帧数 {frames_total}；计划时长{'完成' if completed else '未完成'}。")
+    print("RSS 为进程历史峰值；本测试不代替完整系统、告警链路或实景验收。")
+    return 0 if errors == 0 and cycles > 0 and frames_total > 0 and completed else 1
 
 
 if __name__ == "__main__":

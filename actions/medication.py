@@ -1,12 +1,10 @@
 """场景4 动作：智能吃药提醒（L2 自训药盒检测器 + 时序投票）。
 
 规范硬语义（第六节 + 阈值哲学）：
-- 两阶段：先确认「药盒在场」（阶段一），再判服药动作（阶段二：手腕关键点
-  落入药盒框邻近区域——拿药盒/开盒取药的可达观测代理）；5 帧滑动窗口
-  至少 3 帧命中才算数（时序投票，抗单帧抖动与遮挡）；
+- 两阶段：确认药盒在场，再检查手腕是否靠近药盒；视觉结果只能提示可能接触药物，
+  不能证明吞服。检测到后仍需语音确认，未确认则通知家人跟进；
 - 观察窗（默认 1 小时）结束仍未确认 → 通知家人「未检测到服药」；
-- 宁可漏报不可误报：误报会让老人烦——投票阈值不向敏感方向让步，
-  拿不准就当没吃（交家人跟进），绝不看到药盒就记「已服药」；
+- 未确认不等于未服药；不靠视觉结果记「已服药」；
 - 权重未训练（models/pillbox.pt 不存在）→ 降级为纯语音确认：
   问「药吃了吗」，明确提到药且确认已服才记账；其余回复/无应答 → 非紧急通知家人。
 
@@ -36,6 +34,45 @@ _state_override: StateStore | None = None
 # 内存态且无按日清零——不靠它跨天判断，否则常驻进程下场景4 只活一天
 # （评审回归：mark 成功后 template 条件永远为假）。wakeup.py 同款纪律。
 _marked_date: str | None = None
+
+_VLA_MEDICATION_SCHEMA = {
+    "taking_medication": "true/false：老人是否正在服药、手拿药盒/药瓶/药板、或就水吞服药物",
+    "holding_medicine": "true/false：老人手中是否持有药盒、药瓶、药板或药粒",
+    "drinking_water": "true/false：老人是否正在喝水（服药辅助动作）",
+    "description": "老人当前手部及身体动作简要说明（如正在打开药盒、正在喝水等）",
+    "confidence": "0.0~1.0 置信度浮点数",
+    "uncertain": "true/false：画面看不清或无法判断时为 true",
+}
+
+_VLA_MEDICATION_PROMPT = """你是独居老人的智能看护管家。当前正处于老人的定时服药窗口。
+请仔细观察画面中老人的动作与周围桌面环境，判断老人是否正在服药。
+
+判断依据：
+1. 观察老人手部是否拿有药盒、药瓶、药板、药片/胶囊；
+2. 观察老人是否正在将药片送入口中或端水杯吞服；
+3. 如果老人只是在吃饭、喝茶、玩手机或做与吃药无关的动作，taking_medication 填 false；
+4. 如果画面逆光、遮挡或完全看不清老人动作，uncertain 填 true。"""
+
+
+async def vla_check_medication(frame: np.ndarray) -> dict[str, Any]:
+    """利用 VLA 多模态视觉大模型判定画面中老人是否正在服药。"""
+    from skills import vision
+    try:
+        data = await vision.json_call(
+            frame=frame,
+            prompt=_VLA_MEDICATION_PROMPT,
+            schema=_VLA_MEDICATION_SCHEMA,
+            scene_id="medication_vla",
+        )
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        log = default_log()
+        if log is not None:
+            try:
+                log.log_event("medication", "vla_error", {"error": str(e)})
+            except Exception:
+                pass
+        return {"taking_medication": False, "uncertain": True, "error": str(e)}
 
 
 def reset_singletons() -> None:
@@ -135,22 +172,21 @@ async def _voice_fallback(slot: str, label: str) -> str:
         await notify.send(f"吃药提醒（{label}）：老人回复「{reply}」，"
                           "未确认服药，请跟进。", urgent=False)
         return "voice_pending"
-    await notify.send(f"吃药提醒（{label}）语音无应答（药盒检测器未部署），"
+    await notify.send(f"吃药提醒（{label}）语音无应答，"
                       "请抽空确认。", urgent=False)
     return "voice_no_reply"
 
 
 @skill("medication_watch")
 async def medication_watch(ctx: dict, slot: str = "morning") -> str:
-    """吃药提醒主流程。返回 taken / already_taken / timeout / voice_taken /
+    """吃药提醒主流程。返回 already_taken / timeout / voice_taken /
     voice_pending / voice_no_reply，写 ctx["result"] 落库可溯。
 
     入口先做跨天重置 + 当天已吃检查：今天已记账（_marked_date == today 且
     state 置位）→ 直接 already_taken，不播提醒不通知（按日去重不靠引擎
     template——那是进程态，跨天必失效）。视觉路径：播提醒 → 观察窗内每
     sample_s 秒抓帧 → 阶段一药盒在场投票（通过后落一条 pillbox_present 审计
-    事件，只记一次）→ 阶段二手腕近盒投票 → 确认即 mark_medication + 语音
-    回执；超时通知家人。
+    事件，只记一次）→ 阶段二手腕近盒投票 → 语音确认；超时通知家人。
     """
     from skills import notify, tts
 
@@ -161,7 +197,35 @@ async def medication_watch(ctx: dict, slot: str = "morning") -> str:
     med = config.settings().get("medication", {})
     label = med.get("slot_labels", {}).get(slot, slot)
     detector = _get_detector()
+    use_vla = bool(ctx.get("use_vla") if "use_vla" in ctx else med.get("use_vla", False))
+
     if not detector.available():
+        log = default_log()
+        if log is not None:
+            try:
+                log.log_event("medication", "pillbox_fallback", {
+                    "slot": slot,
+                    "reason": f"未检测到药盒模型权重（{detector._weights_path()}），{'优先执行 VLA 多模态判定' if use_vla else '自动降级为语音确认'}"
+                })
+            except Exception:
+                pass
+
+        if use_vla:
+            loop = asyncio.get_running_loop()
+            frame = await loop.run_in_executor(None, _grab)
+            if frame is not None:
+                vla_res = await vla_check_medication(frame)
+                if vla_res.get("taking_medication") is True or vla_res.get("holding_medicine") is True:
+                    if log is not None:
+                        try:
+                            log.log_event("medication", "vla_possible", {
+                                "slot": slot,
+                                "confidence": vla_res.get("confidence"),
+                                "description": vla_res.get("description", "")
+                            })
+                        except Exception:
+                            pass
+
         return await _voice_fallback(slot, label)
 
     remind = med.get("remind_text", "奶奶，该吃{slot}的药了。")
@@ -205,9 +269,9 @@ async def medication_watch(ctx: dict, slot: str = "morning") -> str:
                 persons = await loop.run_in_executor(None, pose.infer, frame)
             stage2.append(_wrist_near_box(persons, boxes, dilate, kp_conf))
             if _vote_pass(stage2, vote_min):
-                _get_state().mark_medication(slot, True)
-                await tts.speak("好的，看到您拿药盒了，已记下服药。")
-                return "taken"
+                if log is not None:
+                    log.log_event("medication", "possible_hand_near_pillbox", {"slot": slot})
+                return await _voice_fallback(slot, label)
         await asyncio.sleep(sample_s)
     await notify.send(f"{label}服药观察窗内未检测到服药，请关注。",
                       urgent=False)

@@ -19,6 +19,7 @@ from typing import Any
 
 import numpy as np
 
+from core import config
 from core.log import EventLog, default as default_log
 from core.state import StateStore, state as default_state
 
@@ -45,6 +46,11 @@ def _num(value: Any, default: float = 0.0, *,
         number = float(default)
     number = max(minimum, number)
     return min(number, maximum) if maximum is not None else number
+
+
+def _bool(value: Any) -> bool:
+    """模型布尔字段只接受 JSON true/false；字符串等非法值安全回退为 False。"""
+    return value if isinstance(value, bool) else False
 
 
 @dataclass
@@ -95,21 +101,49 @@ _silence_until: float = 0.0
 
 
 def silence_alert(duration_s: float = 1800.0) -> float:
-    """武装防重复静默期（秒），返回静默截止时间戳。"""
+    """武装防重复静默期（秒），返回静默截止时间戳，并持久化到 SQLite。"""
     global _silence_until
     _silence_until = time.time() + max(0.0, float(duration_s))
+    try:
+        from core.log import default as default_log
+        log = default_log()
+        if log is not None:
+            log.set_state_val("silence_until", _silence_until)
+    except Exception:
+        pass
     return _silence_until
 
 
 def is_alert_silenced() -> bool:
-    """是否处于防重复静默期。"""
-    return time.time() < _silence_until
+    """是否处于防重复静默期（内存 + SQLite 持久化自愈）。"""
+    global _silence_until
+    now = time.time()
+    if now < _silence_until:
+        return True
+    try:
+        from core.log import default as default_log
+        log = default_log()
+        if log is not None:
+            persisted = log.get_state_val("silence_until")
+            if isinstance(persisted, (int, float)) and now < persisted:
+                _silence_until = float(persisted)
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def reset_silence() -> None:
     """重置静默状态（测试用）。"""
     global _silence_until
     _silence_until = 0.0
+    try:
+        from core.log import default as default_log
+        log = default_log()
+        if log is not None:
+            log.set_state_val("silence_until", 0.0)
+    except Exception:
+        pass
 
 
 def get_silence_until() -> float:
@@ -134,6 +168,27 @@ def _distress_in_speech(speech: str, distress: list[str]) -> bool:
                 break
             prefix = speech[max(0, i - 2):i]
             if not any(neg in prefix for neg in ("没", "不", "无", "未", "别")):
+                return True
+            start = i + len(kw)
+    return False
+
+
+def _fine_in_speech(speech: str, fine: list[str]) -> bool:
+    """检查 speech 里是否存在未被否定词前缀修饰的平安/没事词。
+
+    对称防御：若老人回复「不是没事」「我可不没事」「一点也不好」，
+    虽然包含「没事」或「好」，但前面有否定词前缀修饰，不得误判为平安撤警。
+    """
+    if not speech:
+        return False
+    for kw in fine:
+        start = 0
+        while True:
+            i = speech.find(kw, start)
+            if i < 0:
+                break
+            prefix = speech[max(0, i - 2):i]
+            if not any(neg in prefix for neg in ("没", "不", "非", "未", "别")):
                 return True
             start = i + len(kw)
     return False
@@ -171,9 +226,14 @@ VLA_DECISION_SCHEMA: dict[str, Any] = {
 class VLAPolicy:
     """基于视觉-语言-动作模型的居家养老多模态决策策略。"""
 
-    def __init__(self, scene_id: str = "vla_agent", backend: str = "cloud") -> None:
+    def __init__(self, scene_id: str = "vla_agent", backend: str = "cloud",
+                 motion_throttle_s: float | None = None) -> None:
         self.scene_id = scene_id
         self.backend = backend
+        cfg = config.settings().get("vla", {})
+        self.motion_throttle_s = float(
+            cfg.get("motion_throttle_s", 60.0) if motion_throttle_s is None else motion_throttle_s)
+        self._last_mundane_motion_ts: float = 0.0
 
     def _build_prompt(self, obs: VLAObservation) -> str:
         """构建要求多模态模型担任家庭养老 AI 管家的提示词。"""
@@ -411,7 +471,8 @@ class VLAPolicy:
                 payload = {"text": text, "listen_reply_s": max(0.0, listen_s)}
             elif mapped_type == ActionType.NOTIFY_FAMILY.value:
                 msg = str(payload.get("msg") or payload.get("text") or payload.get("content") or "").strip()
-                urgent = bool(payload.get("urgent", safety_risk == "emergency"))
+                urgent = (True if safety_risk == "emergency"
+                          else _bool(payload.get("urgent", False)))
                 sender = str(payload.get("sender", "养老AI管家"))
                 recipient = str(payload.get("recipient", "家人"))
                 payload = {"msg": msg, "urgent": urgent, "sender": sender, "recipient": recipient}
@@ -419,7 +480,7 @@ class VLAPolicy:
                 slot = str(payload.get("slot", "morning")).lower()
                 if slot not in ("morning", "noon", "evening"):
                     slot = "morning"
-                taken = bool(payload.get("taken", True))
+                taken = _bool(payload.get("taken", True))
                 payload = {"slot": slot, "taken": taken}
             elif mapped_type == ActionType.UPDATE_STATE.value:
                 entity = str(payload.get("entity") or payload.get("key") or "").strip()
@@ -472,6 +533,19 @@ class VLAPolicy:
         """
         if isinstance(obs, dict):
             obs = VLAObservation(**obs)
+
+        # 节流防护（AUDIT-011）：对日常运动事件（motion_start/stop）进行速率限制，避免频发云端 VLM
+        reason = (obs.trigger_reason or "").strip().lower()
+        if reason in ("motion_start", "motion_stop") and not (obs.speech_text or "").strip():
+            now = time.time()
+            if self._last_mundane_motion_ts > 0 and (now - self._last_mundane_motion_ts < self.motion_throttle_s):
+                return {
+                    "scene_understanding": f"老人日常室内走动中（{reason}节流期内）",
+                    "safety_risk": "normal",
+                    "elder_intent": "normal_activity",
+                    "actions": [{"type": ActionType.WAIT.value, "payload": {"seconds": 0.0, "reason": "throttled"}}],
+                }
+            self._last_mundane_motion_ts = now
 
         prompt = self._build_prompt(obs)
         frame = obs.frame
@@ -572,7 +646,7 @@ async def dispatch_action(
         elif act_type == ActionType.NOTIFY_FAMILY.value:
             from skills import notify
             msg = str(payload.get("msg") or payload.get("text", "")).strip()
-            urgent = bool(payload.get("urgent", False))
+            urgent = _bool(payload.get("urgent", False))
             sender = str(payload.get("sender", "养老AI管家"))
             recipient = str(payload.get("recipient", "家人"))
             direction = str(payload.get("direction", "to_family"))
@@ -588,7 +662,7 @@ async def dispatch_action(
             slot = str(payload.get("slot", "morning")).lower()
             if slot not in ("morning", "noon", "evening"):
                 slot = "morning"
-            taken = bool(payload.get("taken", True))
+            taken = _bool(payload.get("taken", True))
             if target_state is not None:
                 target_state.mark_medication(slot, taken)
             res = {"status": "ok", "slot": slot, "taken": taken}
@@ -714,15 +788,15 @@ async def decide_and_act(
     # 2. 依次派发动作；STOP_ALERT 只有在本次决策里至少一条家人通知送达后才生效
     action_results: list[dict[str, Any]] = []
     followup_actions: list[dict[str, Any]] = []
-    delivered_notify = False
+    urgent_notify_delivered = False
 
     async def _run_action(act) -> dict[str, Any]:
-        nonlocal delivered_notify
+        nonlocal urgent_notify_delivered
         act_dict = act.to_dict() if hasattr(act, "to_dict") else dict(act)
         act_type = str(act_dict.get("type", "")).strip().upper()
-        if act_type == ActionType.STOP_ALERT.value and not delivered_notify:
+        if act_type == ActionType.STOP_ALERT.value and not urgent_notify_delivered:
             res = {"type": ActionType.STOP_ALERT.value, "status": "skipped",
-                   "reason": "本次决策没有已送达的家人通知，不武装静默"}
+                   "reason": "本次决策没有已送达的紧急家人通知，不武装静默"}
             if target_log is not None:
                 try:
                     target_log.log_event("vla_agent", "action",
@@ -731,8 +805,9 @@ async def decide_and_act(
                     pass
             return res
         res = await dispatch_action(act_dict, state=target_state, log=target_log)
-        if act_type == ActionType.NOTIFY_FAMILY.value and res.get("delivered"):
-            delivered_notify = True
+        if (act_type == ActionType.NOTIFY_FAMILY.value
+                and res.get("delivered") and res.get("urgent") is True):
+            urgent_notify_delivered = True
         return res
 
     for act in decision.get("actions", []):
@@ -756,8 +831,8 @@ async def decide_and_act(
             fine_keywords = ["没事", "没摔", "还好", "自己起来", "不疼"]
             distress_keywords = ["救命", "摔", "疼", "起不来", "动不了", "难受", "头晕", "心慌", "不舒服", "救救我"]
 
-            # 若回复包含平安词且无求助
-            if reply and any(k in reply for k in fine_keywords) and not _distress_in_speech(reply, distress_keywords):
+            # 若回复包含未被否定的平安词且无求助
+            if reply and _fine_in_speech(reply, fine_keywords) and not _distress_in_speech(reply, distress_keywords):
                 safe_act = {
                     "type": ActionType.SPEAK.value,
                     "payload": {"text": "好的奶奶，那您慢一点，注意安全。", "listen_reply_s": 0.0},
